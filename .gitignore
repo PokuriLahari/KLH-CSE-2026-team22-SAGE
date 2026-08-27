@@ -1,5 +1,48 @@
-target/
-.env
+# Maven build outputs
+**/target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# Node/Frontend dependencies and build outputs
+**/node_modules/
+**/dist/
+**/build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# IDE and Editor files
 .idea/
+*.iml
+*.iws
+*.ipr
 .vscode/
+.settings/
+.classpath
+.project
+.factorypath
+.apt_generated
+.springBeans
+.sts4-cache
+.nb-gradle/
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+**/application-local.yml
+**/application-local.properties
+
+# Logs and temp files
 *.log
+**/logs/
+*.tmp
+.cache/
+
+# Generated help files
+HELP.md
+**/HELP.md
+
