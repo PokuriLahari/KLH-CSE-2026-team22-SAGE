@@ -15,9 +15,11 @@ import java.io.PrintWriter;
 public class SecurityConfig {
 
     private final UserRepository userRepository;
+    private final JwtUtils jwtUtils;
 
-    public SecurityConfig(UserRepository userRepository) {
+    public SecurityConfig(UserRepository userRepository, JwtUtils jwtUtils) {
         this.userRepository = userRepository;
+        this.jwtUtils = jwtUtils;
     }
 
     @Bean
@@ -44,13 +46,14 @@ public class SecurityConfig {
                             return userRepository.save(newUser);
                         });
                     
+                    String token = jwtUtils.generateToken(user.getId(), user.getEmail());
+
                     try (PrintWriter writer = response.getWriter()) {
                         writer.println("authentication successful");
-                        writer.println();
                         writer.println("User ID: " + user.getId());
                         writer.println("Name: " + user.getName());
                         writer.println("Email: " + user.getEmail());
-                        writer.println("Google ID: " + user.getGoogleId());
+                        writer.println("JWT: " + token);
                     }
                 })
             );
