@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec pnpm install --frozen-lockfile --prefer-offline
