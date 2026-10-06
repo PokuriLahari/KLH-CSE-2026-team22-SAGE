@@ -23,7 +23,11 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
     private String secret;
 
     private static final Map<String, String> PATH_ROLE_MAP = Map.of(
-        "/api/profile/", "STUDENT"
+        "/api/profile/", "STUDENT",
+        "/api/tasks", "STUDENT",
+        "/api/auth/me", "STUDENT",
+        "/api/auth/onboarding", "STUDENT",
+        "/api/sage/", "STUDENT"
     );
 
     @Override
@@ -32,7 +36,7 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
         String path = request.getURI().getPath();
 
         // 1. Allow public auth/login endpoints without JWT
-        if (path.startsWith("/login/") || path.startsWith("/oauth2/")) {
+        if (path.startsWith("/login/") || path.startsWith("/oauth2/") || path.equals("/login") || path.equals("/oauth2")) {
             return chain.filter(exchange);
         }
 
@@ -41,13 +45,21 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
             return chain.filter(exchange);
         }
 
-        // 3. For protected API requests, read authorization header
+        // 3. For protected API requests, read authorization header or cookie
+        String token = null;
         String authHeader = request.getHeaders().getFirst("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            return unauthorized(exchange);
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            token = authHeader.substring(7);
+        } else {
+            org.springframework.http.HttpCookie cookie = request.getCookies().getFirst("sage_token");
+            if (cookie != null && !cookie.getValue().trim().isEmpty()) {
+                token = cookie.getValue().trim();
+            }
         }
 
-        String token = authHeader.substring(7);
+        if (token == null) {
+            return unauthorized(exchange);
+        }
 
         try {
             // 4. Validate signature, algorithm, expiration
