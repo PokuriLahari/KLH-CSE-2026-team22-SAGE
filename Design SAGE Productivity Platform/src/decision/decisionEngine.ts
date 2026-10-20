@@ -4,7 +4,7 @@
 // Principles:
 // 1. "What should this student work on right now?"
 // 2. Pure frontend, deterministic, explainable decision pipeline.
-// 3. Transparent scoring without artificial intelligence / Grok.
+// 3. Transparent scoring without artificial intelligence / Gemini.
 // 4. Honest empty states — never invent tasks, deadlines, or scores.
 // ==================================================
 

@@ -31,8 +31,9 @@
 .DS_Store
 
 # Environment / secrets
-.env
-.env.local
+**/.env
+**/.env.*
+!**/.env.example
 **/application-local.yml
 **/application-local.properties
 
@@ -46,3 +47,19 @@
 HELP.md
 **/HELP.md
 
+# Archived prototypes & duplicate folders
+_archive/
+
+# Root prototype files (canonical frontend is in "Design SAGE Productivity Platform")
+/src/
+/public/
+/index.html
+/vite.config.ts
+/tsconfig.json
+/package.json
+/pnpm-lock.yaml
+/.figma/
+/.mise.toml
+/AGENTS.md
+/CLAUDE.md
+/.gitattributes

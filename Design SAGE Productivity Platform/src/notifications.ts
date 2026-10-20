@@ -9,7 +9,9 @@
 // 5. Clean service boundary prepared for future Spring Boot backend.
 // ==================================================
 
-export type ReminderTiming = "exact" | "10m" | "30m" | "1h" | "1d"
+import { getUserItem, setUserItem, type UserIdentifier } from "./userStorage.ts"
+
+export type ReminderTiming = "exact" | "10m" | "30m" | "1h" | "2h" | "1d"
 
 export type Reminder = {
   id: number
@@ -26,8 +28,12 @@ export type Reminder = {
   dismissed: boolean
   notificationTiming: ReminderTiming
   notifiedAt?: string
-  targetType?: "reminder" | "task" | "exam"
-  targetId?: number
+  targetType?: "reminder" | "task" | "exam" | "contest"
+  targetId?: number | string
+  contestId?: string
+  platform?: string
+  contestUrl?: string
+  eventStartTime?: string
 }
 
 export type NotificationPreferences = {
@@ -58,6 +64,7 @@ export const TIMING_OFFSETS_MS: Record<ReminderTiming, number> = {
   "10m": 10 * 60 * 1000,
   "30m": 30 * 60 * 1000,
   "1h": 60 * 60 * 1000,
+  "2h": 120 * 60 * 1000,
   "1d": 24 * 60 * 60 * 1000,
 }
 
@@ -66,6 +73,7 @@ export const TIMING_LABELS: Record<ReminderTiming, string> = {
   "10m": "10 minutes before",
   "30m": "30 minutes before",
   "1h": "1 hour before",
+  "2h": "2 hours before",
   "1d": "1 day before",
 }
 
@@ -92,6 +100,18 @@ export function getReminderTriggerTime(reminder: Reminder): number {
     const snoozedMs = new Date(reminder.snoozedUntil).getTime()
     if (!isNaN(snoozedMs)) return snoozedMs
   }
+  if (reminder.targetType === "contest") {
+    // For contest reminders, dueAt is the computed notification due time
+    if (reminder.dueAt) {
+      const dueMs = new Date(reminder.dueAt).getTime()
+      if (!isNaN(dueMs)) return dueMs
+    }
+    if (reminder.eventStartTime) {
+      const startMs = new Date(reminder.eventStartTime).getTime()
+      const offset = TIMING_OFFSETS_MS[reminder.notificationTiming] || 0
+      return Math.max(0, startMs - offset)
+    }
+  }
   const baseMs = reminder.dueAt
     ? new Date(reminder.dueAt).getTime()
     : new Date(buildDueAtTimestamp(reminder.date, reminder.time)).getTime()
@@ -101,10 +121,19 @@ export function getReminderTriggerTime(reminder: Reminder): number {
 
 /**
  * Determines whether a reminder is currently due for notification.
+ * Safely guards against expired contests and missing or invalid contest start times.
  */
 export function isReminderDue(reminder: Reminder, now = new Date()): boolean {
   if (reminder.status === "completed" || reminder.dismissed) {
     return false
+  }
+  if (reminder.targetType === "contest") {
+    if (!reminder.eventStartTime) return false
+    const contestStartMs = new Date(reminder.eventStartTime).getTime()
+    // Invalid or already expired contest start time
+    if (isNaN(contestStartMs) || contestStartMs <= now.getTime()) {
+      return false
+    }
   }
   const triggerMs = getReminderTriggerTime(reminder)
   return now.getTime() >= triggerMs
@@ -268,5 +297,132 @@ export function normalizeReminder(raw: RawReminderInput): Reminder {
     notifiedAt: raw.notifiedAt,
     targetType: raw.targetType,
     targetId: raw.targetId,
+    contestId:
+      raw.contestId ||
+      (raw.targetType === "contest" && raw.targetId != null
+        ? String(raw.targetId)
+        : undefined),
+    platform: raw.platform,
+    contestUrl: raw.contestUrl,
+    eventStartTime: raw.eventStartTime,
   }
+}
+
+export type ContestReminderInput = {
+  id: string
+  name: string
+  platform: string
+  startTime: string
+  url?: string
+}
+
+/**
+ * Creates or updates a unified contest reminder.
+ * Enforces single source of truth and prevents duplicate reminders.
+ */
+export function upsertContestReminder(
+  reminders: Reminder[],
+  contest: ContestReminderInput,
+  timing: ReminderTiming,
+): Reminder[] {
+  const startMs = new Date(contest.startTime).getTime()
+  if (isNaN(startMs)) return reminders
+
+  const offsetMs = TIMING_OFFSETS_MS[timing] ?? 0
+  const triggerMs = Math.max(0, startMs - offsetMs)
+  const triggerDate = new Date(triggerMs)
+  const triggerDateStr = `${triggerDate.getFullYear()}-${String(
+    triggerDate.getMonth() + 1,
+  ).padStart(2, "0")}-${String(triggerDate.getDate()).padStart(2, "0")}`
+  const triggerTimeStr = `${String(triggerDate.getHours()).padStart(
+    2,
+    "0",
+  )}:${String(triggerDate.getMinutes()).padStart(2, "0")}`
+
+  const existingIndex = reminders.findIndex(
+    (r) =>
+      (r.targetType === "contest" &&
+        String(r.targetId) === String(contest.id)) ||
+      r.contestId === contest.id,
+  )
+
+  const updatedReminder: Reminder = normalizeReminder({
+    id: existingIndex >= 0 ? reminders[existingIndex].id : Date.now(),
+    title: `${contest.platform}: ${contest.name}`,
+    date: triggerDateStr,
+    time: triggerTimeStr,
+    dueAt: triggerDate.toISOString(),
+    createdAt:
+      existingIndex >= 0
+        ? reminders[existingIndex].createdAt
+        : new Date().toISOString(),
+    notificationTiming: timing,
+    method: "In-app",
+    status: "open",
+    read: false,
+    dismissed: false,
+    targetType: "contest",
+    targetId: contest.id,
+    contestId: contest.id,
+    platform: contest.platform,
+    contestUrl: contest.url,
+    eventStartTime: contest.startTime,
+  })
+
+  if (existingIndex >= 0) {
+    const next = [...reminders]
+    next[existingIndex] = updatedReminder
+    return next
+  }
+
+  return [...reminders, updatedReminder]
+}
+
+/**
+ * Removes a contest reminder by contest ID.
+ */
+export function removeContestReminder(
+  reminders: Reminder[],
+  contestId: string,
+): Reminder[] {
+  return reminders.filter(
+    (r) =>
+      !(
+        (r.targetType === "contest" &&
+          String(r.targetId) === String(contestId)) ||
+        r.contestId === contestId
+      ),
+  )
+}
+
+/**
+ * Finds an active (non-dismissed, non-completed) reminder for a contest.
+ */
+export function findContestReminder(
+  reminders: Reminder[],
+  contestId: string,
+): Reminder | undefined {
+  return reminders.find(
+    (r) =>
+      ((r.targetType === "contest" &&
+        String(r.targetId) === String(contestId)) ||
+        r.contestId === contestId) &&
+      !r.dismissed &&
+      r.status !== "completed",
+  )
+}
+
+export function loadSavedReminders(userOrId?: UserIdentifier): Reminder[] {
+  const saved = getUserItem<Reminder[]>(REMINDERS_STORAGE_KEY, userOrId)
+  if (Array.isArray(saved)) {
+    return saved.map(normalizeReminder)
+  }
+  return []
+}
+
+export function saveReminders(
+  reminders: Reminder[],
+  userOrId?: UserIdentifier,
+): void {
+  setUserItem(REMINDERS_STORAGE_KEY, reminders, userOrId)
 }

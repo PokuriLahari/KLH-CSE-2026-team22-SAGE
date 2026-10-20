@@ -13,13 +13,34 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "google_id", unique = true, nullable = false)
+    @Column(name = "google_id", unique = true, nullable = true)
     private String googleId;
 
     @Column(nullable = false)
     private String email;
 
     private String name;
+
+    @Column(name = "auth_provider")
+    private String authProvider = "GOOGLE";
+
+    @Column(name = "email_verified")
+    private Boolean emailVerified = false;
+
+    @Column(name = "notification_email")
+    private String notificationEmail;
+
+    @Column(name = "notification_email_verified")
+    private Boolean notificationEmailVerified = false;
+
+    @Column(name = "onboarding_completed")
+    private Boolean onboardingCompleted = false;
+
+    private String college;
+    private String course;
+    @Column(name = "\"year\"")
+    private String year;
+    private String timezone;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -30,6 +51,46 @@ public class User {
     private LocalDateTime updatedAt;
 
     public User() {
+    }
+
+    public Boolean isOnboardingCompleted() {
+        return Boolean.TRUE.equals(onboardingCompleted);
+    }
+
+    public void setOnboardingCompleted(Boolean onboardingCompleted) {
+        this.onboardingCompleted = onboardingCompleted;
+    }
+
+    public String getCollege() {
+        return college;
+    }
+
+    public void setCollege(String college) {
+        this.college = college;
+    }
+
+    public String getCourse() {
+        return course;
+    }
+
+    public void setCourse(String course) {
+        this.course = course;
+    }
+
+    public String getYear() {
+        return year;
+    }
+
+    public void setYear(String year) {
+        this.year = year;
+    }
+
+    public String getTimezone() {
+        return timezone;
+    }
+
+    public void setTimezone(String timezone) {
+        this.timezone = timezone;
     }
 
     public Long getId() {
@@ -70,6 +131,38 @@ public class User {
 
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getAuthProvider() {
+        return authProvider;
+    }
+
+    public void setAuthProvider(String authProvider) {
+        this.authProvider = authProvider;
+    }
+
+    public Boolean isEmailVerified() {
+        return Boolean.TRUE.equals(emailVerified);
+    }
+
+    public void setEmailVerified(Boolean emailVerified) {
+        this.emailVerified = emailVerified;
+    }
+
+    public String getNotificationEmail() {
+        return notificationEmail;
+    }
+
+    public void setNotificationEmail(String notificationEmail) {
+        this.notificationEmail = notificationEmail;
+    }
+
+    public Boolean isNotificationEmailVerified() {
+        return Boolean.TRUE.equals(notificationEmailVerified);
+    }
+
+    public void setNotificationEmailVerified(Boolean notificationEmailVerified) {
+        this.notificationEmailVerified = notificationEmailVerified;
     }
 
     public LocalDateTime getUpdatedAt() {

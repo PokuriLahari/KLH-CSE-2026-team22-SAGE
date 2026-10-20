@@ -1,6 +1,38 @@
+server:
+  port: 8080
+
 spring:
   application:
     name: api-gateway
 
   config:
     import: "optional:configserver:http://localhost:8888"
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+
+jwt:
+  secret: ${JWT_SECRET:sage-secret-key-super-secure-at-least-32-bytes-long}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    api_gateway: ${SAGE_GATEWAY_LOG_LEVEL:INFO}
+    org.springframework.cloud.gateway: ${SAGE_GATEWAY_TRACE_LEVEL:INFO}
+  file:
+    name: ${SAGE_LOG_DIR:../logs}/api-gateway.log

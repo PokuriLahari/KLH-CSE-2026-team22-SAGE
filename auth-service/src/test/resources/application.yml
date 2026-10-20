@@ -30,3 +30,20 @@ spring:
 
 jwt:
   secret: test-secret-key-super-secure-at-least-32-bytes-long
+
+sage:
+  ai:
+    provider: "google-gemini"
+    gemini:
+      api-key: ""
+      base-url: "https://generativelanguage.googleapis.com/v1beta"
+      model: "gemini-3.8-flash"
+      timeout-seconds: 5
+  email:
+    resend:
+      api-key: ""
+      from: "SAGE <onboarding@resend.dev>"
+    worker:
+      enabled: false
+      interval-ms: 60000
+

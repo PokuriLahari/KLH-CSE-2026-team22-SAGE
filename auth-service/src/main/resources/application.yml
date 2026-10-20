@@ -26,7 +26,7 @@ spring:
       client:
         registration:
           google:
-            client-id: ${GOOGLE_CLIENT_ID:dummy-google-client-id}
+            client-id: ${GOOGLE_CLIENT_ID:832115590292-i3h1b0qs87tahau5gq653ifdf5mum93r.apps.googleusercontent.com}
             client-secret: ${GOOGLE_CLIENT_SECRET:dummy-google-client-secret}
             redirect-uri: "{baseUrl}/login/oauth2/code/google"
             scope:
@@ -45,3 +45,37 @@ eureka:
 
 jwt:
   secret: ${JWT_SECRET:sage-secret-key-super-secure-at-least-32-bytes-long}
+
+sage:
+  ai:
+    provider: ${AI_PROVIDER:google-gemini}
+    gemini:
+      api-key: ${GEMINI_API_KEY:${GEMINI_FALLBACK_API_KEY:}}
+      base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
+      model: ${GEMINI_MODEL:gemini-3-flash-preview}
+      timeout-seconds: ${GEMINI_TIMEOUT_SECONDS:25}
+  email:
+    resend:
+      api-key: ${RESEND_API_KEY:}
+      from: ${EMAIL_FROM:SAGE <onboarding@resend.dev>}
+    worker:
+      enabled: ${REMINDER_WORKER_ENABLED:true}
+      interval-ms: ${REMINDER_WORKER_INTERVAL_MS:30000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    auth_service: ${SAGE_AUTH_LOG_LEVEL:INFO}
+    org.hibernate.SQL: ${SAGE_SQL_LOG_LEVEL:WARN}
+    org.springframework.web: ${SAGE_WEB_LOG_LEVEL:WARN}
+  file:
+    name: ${SAGE_LOG_DIR:../logs}/auth-service.log

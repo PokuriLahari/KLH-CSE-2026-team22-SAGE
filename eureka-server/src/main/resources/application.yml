@@ -9,3 +9,19 @@ eureka:
   client:
     register-with-eureka: false
     fetch-registry: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.netflix.eureka: ${SAGE_EUREKA_LOG_LEVEL:INFO}
+  file:
+    name: ${SAGE_LOG_DIR:../logs}/eureka-server.log

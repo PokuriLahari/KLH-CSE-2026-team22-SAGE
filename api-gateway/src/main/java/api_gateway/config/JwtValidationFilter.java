@@ -15,6 +15,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 @Component
 public class JwtValidationFilter implements GlobalFilter, Ordered {
@@ -27,7 +29,9 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
         "/api/tasks", "STUDENT",
         "/api/auth/me", "STUDENT",
         "/api/auth/onboarding", "STUDENT",
-        "/api/sage/", "STUDENT"
+        "/api/auth/account", "STUDENT",
+        "/api/sage/", "STUDENT",
+        "/api/reminders", "STUDENT"
     );
 
     @Override
@@ -35,17 +39,31 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
         ServerHttpRequest request = exchange.getRequest();
         String path = request.getURI().getPath();
 
-        // 1. Allow public auth/login endpoints without JWT
-        if (path.startsWith("/login/") || path.startsWith("/oauth2/") || path.equals("/login") || path.equals("/oauth2")) {
-            return chain.filter(exchange);
+        // 1. Method-specific and path-specific exemption for POST /api/auth/google
+        boolean isGoogleAuthExchange = path.equals("/api/auth/google")
+            && org.springframework.http.HttpMethod.POST.equals(request.getMethod());
+
+        boolean isPublicEndpoint = isGoogleAuthExchange
+            || path.startsWith("/login/")
+            || path.startsWith("/oauth2/")
+            || path.equals("/login")
+            || path.equals("/oauth2")
+            || path.startsWith("/actuator/")
+            || path.equals("/favicon.ico");
+
+        if (isPublicEndpoint) {
+            // Sanitize identity headers so client cannot spoof identity on public endpoints
+            ServerHttpRequest sanitizedRequest = request.mutate()
+                .headers(headers -> {
+                    headers.remove("X-User-Id");
+                    headers.remove("X-User-Email");
+                    headers.remove("X-User-Role");
+                })
+                .build();
+            return chain.filter(exchange.mutate().request(sanitizedRequest).build());
         }
 
-        // 2. Allow health/actuator/basic infrastructure
-        if (path.startsWith("/actuator/") || path.equals("/favicon.ico")) {
-            return chain.filter(exchange);
-        }
-
-        // 3. For protected API requests, read authorization header or cookie
+        // 2. For protected API requests, read authorization header or cookie
         String token = null;
         String authHeader = request.getHeaders().getFirst("Authorization");
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
@@ -97,20 +115,26 @@ public class JwtValidationFilter implements GlobalFilter, Ordered {
 
         } catch (Exception e) {
             // Invalid or expired token
+            org.slf4j.LoggerFactory.getLogger(getClass()).warn("event=jwt_rejected path={} requestId={} reason={}", path, request.getHeaders().getFirst("X-Request-Id"), e.getClass().getSimpleName());
             return unauthorized(exchange);
         }
     }
 
     private Mono<Void> unauthorized(ServerWebExchange exchange) {
-        ServerHttpResponse response = exchange.getResponse();
-        response.setStatusCode(HttpStatus.UNAUTHORIZED);
-        return response.setComplete();
+        return writeError(exchange, HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Authentication is required.");
     }
 
     private Mono<Void> forbidden(ServerWebExchange exchange) {
+        return writeError(exchange, HttpStatus.FORBIDDEN, "FORBIDDEN", "You don't have permission to perform this action.");
+    }
+
+    private Mono<Void> writeError(ServerWebExchange exchange, HttpStatus status, String error, String message) {
         ServerHttpResponse response = exchange.getResponse();
-        response.setStatusCode(HttpStatus.FORBIDDEN);
-        return response.setComplete();
+        response.setStatusCode(status);
+        response.getHeaders().set("Content-Type", "application/json");
+        String requestId = response.getHeaders().getFirst("X-Request-Id");
+        String body = String.format("{\"timestamp\":\"%s\",\"status\":%d,\"error\":\"%s\",\"message\":\"%s\",\"requestId\":\"%s\",\"path\":\"%s\"}", Instant.now(), status.value(), error, message, requestId == null ? "" : requestId, exchange.getRequest().getURI().getPath());
+        return response.writeWith(Mono.just(response.bufferFactory().wrap(body.getBytes(StandardCharsets.UTF_8))));
     }
 
     @Override

@@ -8,7 +8,7 @@
 // 4. Honest error masking: no leaked backend stack traces.
 // ==================================================
 
-import { apiClient } from "../api/client"
+import { apiClient, getStoredToken } from "../api/client"
 import type { ItemStatus, Task } from "../decision/decisionTypes"
 
 export type BackendTaskDto = {
@@ -27,22 +27,25 @@ export type BackendTaskDto = {
   updatedAt?: string
 }
 
+import {
+  getUserItem,
+  setUserItem,
+  getUserScopeKey,
+  type UserIdentifier,
+} from "../userStorage.ts"
+
 const LOCAL_STORAGE_KEY = "sage-tasks"
 
-function getStoredLocalTasks(): Task[] {
-  if (typeof window === "undefined") return []
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (raw) return JSON.parse(raw) as Task[]
-  } catch {}
-  return []
+export function getStoredLocalTasks(userOrId?: UserIdentifier): Task[] {
+  const tasks = getUserItem<Task[]>(LOCAL_STORAGE_KEY, userOrId)
+  return Array.isArray(tasks) ? tasks : []
 }
 
-function saveStoredLocalTasks(tasks: Task[]): void {
-  if (typeof window === "undefined") return
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tasks))
-  } catch {}
+export function saveStoredLocalTasks(
+  tasks: Task[],
+  userOrId?: UserIdentifier,
+): void {
+  setUserItem(LOCAL_STORAGE_KEY, tasks, userOrId)
 }
 
 /**
@@ -128,9 +131,12 @@ export function toBackendTaskPayload(
 export const taskService = {
   /**
    * Retrieves tasks from backend through Gateway :8080.
-   * If backend returns 401 or is unreachable, falls back to localStorage.
+   * If backend returns 401, token is missing, or is unreachable, falls back to localStorage.
    */
   getTasks: async (): Promise<Task[]> => {
+    if (!getStoredToken()) {
+      return getStoredLocalTasks()
+    }
     try {
       const response = await apiClient.get<BackendTaskDto[]>("/tasks")
       if (Array.isArray(response)) {
@@ -148,15 +154,19 @@ export const taskService = {
    * Dispatches task creation to backend through Gateway :8080.
    */
   createTask: async (input: Omit<Task, "id">): Promise<Task> => {
-    try {
-      const payload = toBackendTaskPayload(input)
-      const response = await apiClient.post<BackendTaskDto>("/tasks", payload)
-      if (response && response.id) {
-        const created = toFrontendTask(response)
-        return created
+    if (getStoredToken()) {
+      try {
+        const payload = toBackendTaskPayload(input)
+        const response = await apiClient.post<BackendTaskDto>("/tasks", payload)
+        if (response && response.id) {
+          const created = toFrontendTask(response)
+          const current = getStoredLocalTasks()
+          saveStoredLocalTasks([created, ...current])
+          return created
+        }
+      } catch {
+        // Fallback
       }
-    } catch {
-      // Fallback
     }
 
     // Local fallback
@@ -165,6 +175,8 @@ export const taskService = {
       id: Date.now(),
       createdAt: new Date().toISOString(),
     }
+    const current = getStoredLocalTasks()
+    saveStoredLocalTasks([localTask, ...current])
     return localTask
   },
 
@@ -175,30 +187,56 @@ export const taskService = {
     id: number,
     patch: Partial<Task>,
   ): Promise<Task | null> => {
-    try {
-      const payload = toBackendTaskPayload(patch)
-      const response = await apiClient.patch<BackendTaskDto>(
-        `/tasks/${id}`,
-        payload,
-      )
-      if (response && response.id) {
-        return toFrontendTask(response)
+    if (getStoredToken()) {
+      try {
+        const payload = toBackendTaskPayload(patch)
+        const response = await apiClient.patch<BackendTaskDto>(
+          `/tasks/${id}`,
+          payload,
+        )
+        if (response && response.id) {
+          const updated = toFrontendTask(response)
+          const current = getStoredLocalTasks().map((t) =>
+            t.id === id ? { ...t, ...updated } : t,
+          )
+          saveStoredLocalTasks(current)
+          return updated
+        }
+      } catch {
+        // Fallback
       }
-    } catch {
-      // Fallback
     }
-    return null
+
+    // Local fallback update
+    const current = getStoredLocalTasks()
+    let updatedTask: Task | null = null
+    const updatedList = current.map((t) => {
+      if (t.id === id) {
+        updatedTask = { ...t, ...patch }
+        return updatedTask
+      }
+      return t
+    })
+    saveStoredLocalTasks(updatedList)
+    return updatedTask
   },
 
   /**
    * Dispatches task deletion to /api/tasks/{id}.
    */
   deleteTask: async (id: number): Promise<boolean> => {
-    try {
-      await apiClient.delete(`/tasks/${id}`)
-      return true
-    } catch {
-      return false
+    if (getStoredToken()) {
+      try {
+        await apiClient.delete(`/tasks/${id}`)
+        const current = getStoredLocalTasks().filter((t) => t.id !== id)
+        saveStoredLocalTasks(current)
+        return true
+      } catch {
+        // Fallback
+      }
     }
+    const current = getStoredLocalTasks().filter((t) => t.id !== id)
+    saveStoredLocalTasks(current)
+    return true
   },
 }

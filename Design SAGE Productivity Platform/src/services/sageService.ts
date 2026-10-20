@@ -3,13 +3,13 @@
 // ==================================================
 // Principles:
 // 1. Communicates with Spring Boot backend at /api/sage/ask through shared apiClient.
-// 2. NO direct calls to Grok or external LLMs from React.
+// 2. NO direct calls to Gemini or external LLMs from React.
 // 3. NO API secrets, API keys, or provider tokens in frontend code.
 // 4. Honest error handling with user-safe messaging (no leaked stack traces).
 // 5. Clean request/response contract adapter for backend compatibility.
 // ==================================================
 
-import { apiClient } from "../api/client"
+import { apiClient } from "../api/client.ts"
 
 export type SageContext = {
   taskIds?: string[]
@@ -95,7 +95,10 @@ export async function askSage(
     if (err instanceof DOMException && err.name === "AbortError") {
       throw err
     }
-    // Re-throw user-safe friendly error message, concealing any raw network / proxy details
+    if (err instanceof Error && err.message) {
+      throw err
+    }
+    // Re-throw user-safe friendly error message
     throw new Error("SAGE couldn't connect right now. Please try again.")
   }
 }

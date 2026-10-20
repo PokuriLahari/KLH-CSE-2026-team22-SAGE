@@ -8,7 +8,11 @@
 // 4. Consecutive periods of the same course are merged into one block.
 // 5. Course codes resolve strictly via COURSE_CATALOG without guessing.
 // 6. Faculty name is NEVER used as course name.
+// 7. No Default Pre-population: Brand-new users start with an empty schedule.
+// 8. User Data Isolation: Timetable storage is scoped strictly by SAGE user ID.
 // ==================================================
+
+import { getUserItem, setUserItem, type UserIdentifier } from "./userStorage.ts"
 
 export interface PeriodTime {
   period: number
@@ -186,17 +190,14 @@ export function mergeConsecutivePeriods(
   return merged
 }
 
-// Canonical institutional timetable dataset
-// Contains official course codes, consecutive periods, and campus room locations
+// Optional canonical institutional timetable template for explicit preview/demonstration
+// NEVER loaded as a default for new users.
 export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
   // MONDAY:
-  // Periods 1 & 2: 24UC0008 (Indian Constitution) -> Merges to 08:10 – 09:50 in Room K-206
   { dayOfWeek: 1, period: 1, courseCode: "24UC0008", location: "RoomNo-K-206" },
   { dayOfWeek: 1, period: 2, courseCode: "24UC0008", location: "RoomNo-K-206" },
-  // Periods 3 & 4: 24CS3105 (Information Assurance and Security) -> 09:50 – 11:30 in Room K-407
   { dayOfWeek: 1, period: 3, courseCode: "24CS3105", location: "RoomNo-K-407" },
   { dayOfWeek: 1, period: 4, courseCode: "24CS3105", location: "RoomNo-K-407" },
-  // Period 5: 24DEA3101 (Fundamentals of Data Engineering) -> 11:30 – 12:20 in Room K-313
   {
     dayOfWeek: 1,
     period: 5,
@@ -205,7 +206,6 @@ export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
   },
 
   // TUESDAY:
-  // Periods 3 & 4: 24DEA3101 -> 09:50 – 11:30 in Room K-313
   {
     dayOfWeek: 2,
     period: 3,
@@ -218,16 +218,13 @@ export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
     courseCode: "24DEA3101",
     location: "RoomNo-K-313",
   },
-  // Periods 7, 8 & 9: 24CI3201 (Adaptive Software Engineering) -> Merges 3 periods: 13:10 – 15:40 in Room K-009
   { dayOfWeek: 2, period: 7, courseCode: "24CI3201", location: "RoomNo-K-009" },
   { dayOfWeek: 2, period: 8, courseCode: "24CI3201", location: "RoomNo-K-009" },
   { dayOfWeek: 2, period: 9, courseCode: "24CI3201", location: "RoomNo-K-009" },
 
   // WEDNESDAY:
-  // Periods 1 & 2: 24CS3105 (Information Assurance and Security) -> 08:10 – 09:50 in Room K-407
   { dayOfWeek: 3, period: 1, courseCode: "24CS3105", location: "RoomNo-K-407" },
   { dayOfWeek: 3, period: 2, courseCode: "24CS3105", location: "RoomNo-K-407" },
-  // Periods 7 & 8: 24CC3014 (AWS Certified Solutions Architect) -> 13:10 – 14:50 in Computer Centre
   {
     dayOfWeek: 3,
     period: 7,
@@ -242,15 +239,12 @@ export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
   },
 
   // THURSDAY:
-  // Periods 2 & 3: 24CI3201 (Adaptive Software Engineering) -> 09:00 – 10:40 in Room K-009
   { dayOfWeek: 4, period: 2, courseCode: "24CI3201", location: "RoomNo-K-009" },
   { dayOfWeek: 4, period: 3, courseCode: "24CI3201", location: "RoomNo-K-009" },
-  // Periods 5 & 6: 24SDCS03 (Course name unavailable - not in catalog, never guessed) -> 11:30 – 13:10 in Room K-210
   { dayOfWeek: 4, period: 5, courseCode: "24SDCS03", location: "RoomNo-K-210" },
   { dayOfWeek: 4, period: 6, courseCode: "24SDCS03", location: "RoomNo-K-210" },
 
   // FRIDAY:
-  // Periods 1 & 2: 24DEA3101 (Fundamentals of Data Engineering) -> 08:10 – 09:50 in Room K-313
   {
     dayOfWeek: 5,
     period: 1,
@@ -263,7 +257,6 @@ export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
     courseCode: "24DEA3101",
     location: "RoomNo-K-313",
   },
-  // Periods 7, 8 & 9: 24CC3014 (AWS Certified Solutions Architect) -> 13:10 – 15:40 in Computer Centre
   {
     dayOfWeek: 5,
     period: 7,
@@ -284,7 +277,14 @@ export const OFFICIAL_TIMETABLE_SLOTS: RawTimetableSlot[] = [
   },
 ]
 
-// Parse raw timetable lines or simulate uploaded timetable image parsing
+/**
+ * Returns a copy of the canonical sample template ONLY when explicitly requested by user.
+ */
+export function getSampleTimetableTemplate(): TimetableEntry[] {
+  return mergeConsecutivePeriods(OFFICIAL_TIMETABLE_SLOTS)
+}
+
+// Parse raw timetable text. If no valid course codes found, returns empty array.
 export function parseTimetableFromText(text: string): TimetableEntry[] {
   const slots: RawTimetableSlot[] = []
   const lines = text
@@ -332,44 +332,103 @@ export function parseTimetableFromText(text: string): TimetableEntry[] {
     return mergeConsecutivePeriods(slots)
   }
 
-  // Fallback to official verified schedule if unstructured image
-  return mergeConsecutivePeriods(OFFICIAL_TIMETABLE_SLOTS)
+  // Never fall back to fabricated timetable data!
+  return []
 }
 
-// Parse uploaded file (Image/PDF)
+// Parse uploaded file (Image/PDF/Text)
 export async function parseUploadedTimetableFile(
   file: File,
 ): Promise<TimetableEntry[]> {
   try {
     const text = await file.text()
-    if (text && text.length > 20 && /2[34][A-Z0-9]/i.test(text)) {
-      return parseTimetableFromText(text)
+    if (text && text.length > 10) {
+      const parsed = parseTimetableFromText(text)
+      if (parsed.length > 0) return parsed
     }
   } catch {}
-  // Default to institutional schedule parsed with consecutive period merging
-  return mergeConsecutivePeriods(OFFICIAL_TIMETABLE_SLOTS)
-}
-
-// Storage helpers
-export function loadSavedTimetable(): TimetableEntry[] {
-  if (typeof window === "undefined") return []
-  try {
-    const saved = window.localStorage.getItem(TIMETABLE_STORAGE_KEY)
-    if (saved) {
-      const parsed: TimetableEntry[] = JSON.parse(saved)
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed
-      }
-    }
-  } catch {}
+  // Never default to fabricated timetable; return empty array so UI can display proper error/manual state
   return []
 }
 
-export function saveTimetable(entries: TimetableEntry[]): void {
-  if (typeof window === "undefined") return
-  try {
-    window.localStorage.setItem(TIMETABLE_STORAGE_KEY, JSON.stringify(entries))
-  } catch {}
+/**
+ * Creates a valid TimetableEntry manually from user form input.
+ */
+export function createManualTimetableEntry(params: {
+  dayOfWeek: number
+  courseCode: string
+  startPeriod: number
+  endPeriod: number
+  location?: string
+  customCourseName?: string
+}): TimetableEntry | null {
+  const {
+    dayOfWeek,
+    courseCode,
+    startPeriod,
+    endPeriod,
+    location,
+    customCourseName,
+  } = params
+  if (!courseCode || !courseCode.trim()) return null
+  if (dayOfWeek < 1 || dayOfWeek > 7) return null
+  if (
+    startPeriod < 1 ||
+    startPeriod > 11 ||
+    endPeriod < startPeriod ||
+    endPeriod > 11
+  )
+    return null
+
+  const cleanCode = courseCode.trim().toUpperCase()
+  const resolved = resolveCourseName(cleanCode)
+  const courseName = customCourseName?.trim() || resolved.name
+  const isKnown = resolved.isKnown || Boolean(customCourseName?.trim())
+
+  const periodStart = PERIOD_SCHEDULE[startPeriod]
+  const periodEnd = PERIOD_SCHEDULE[endPeriod]
+  if (!periodStart || !periodEnd) return null
+
+  const dayNames = [
+    "",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+  ]
+
+  return {
+    id: `tt-man-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    dayOfWeek,
+    dayName: dayNames[dayOfWeek] || `Day ${dayOfWeek}`,
+    courseCode: cleanCode,
+    courseName,
+    isKnownCourse: isKnown,
+    startTime: periodStart.start,
+    endTime: periodEnd.end,
+    startPeriod,
+    endPeriod,
+    location: location ? normalizeLocation(location) : undefined,
+    recurring: true,
+  }
+}
+
+// User-scoped storage helpers: each account has its own independent timetable data.
+export function loadSavedTimetable(
+  userOrId?: UserIdentifier,
+): TimetableEntry[] {
+  const entries = getUserItem<TimetableEntry[]>(TIMETABLE_STORAGE_KEY, userOrId)
+  return Array.isArray(entries) ? entries : []
+}
+
+export function saveTimetable(
+  entries: TimetableEntry[],
+  userOrId?: UserIdentifier,
+): void {
+  setUserItem(TIMETABLE_STORAGE_KEY, entries, userOrId)
 }
 
 // Query classes for a specific day of the week (1 = Monday ... 7 = Sunday)

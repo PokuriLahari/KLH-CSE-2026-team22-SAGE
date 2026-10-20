@@ -11,4 +11,20 @@ spring:
         git:
           uri: file:///D:/Documents/Documents/PROJECTS/sage-config-repo
           default-label: main
-          clone-on-start: true
+        clone-on-start: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    org.springframework.cloud.config: ${SAGE_CONFIG_LOG_LEVEL:INFO}
+  file:
+    name: ${SAGE_LOG_DIR:../logs}/config-server.log

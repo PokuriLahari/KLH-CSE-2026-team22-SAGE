@@ -1,0 +1,6 @@
+<configuration>
+  <property name="LOG_FILE" value="${SAGE_LOG_DIR:-../logs}/config-server.log"/>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"><encoder><pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%-5level service=config-server logger=%logger{36} %msg%n</pattern></encoder></appender>
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"><file>${LOG_FILE}</file><rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy"><fileNamePattern>${LOG_FILE}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern><maxHistory>14</maxHistory><totalSizeCap>1GB</totalSizeCap><timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP"><maxFileSize>10MB</maxFileSize></timeBasedFileNamingAndTriggeringPolicy></rollingPolicy><encoder><pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%-5level service=config-server logger=%logger{36} %msg%n</pattern></encoder></appender>
+  <root level="INFO"><appender-ref ref="CONSOLE"/><appender-ref ref="FILE"/></root>
+</configuration>

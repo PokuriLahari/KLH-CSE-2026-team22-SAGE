@@ -22,4 +22,14 @@ public class JwtUtils {
             .withExpiresAt(new Date(System.currentTimeMillis() + 24 * 60 * 60 * 1000)) // 24 hours expiration
             .sign(algorithm);
     }
+
+    public com.auth0.jwt.interfaces.DecodedJWT verifyToken(String token) {
+        try {
+            Algorithm algorithm = Algorithm.HMAC256(secret);
+            com.auth0.jwt.JWTVerifier verifier = JWT.require(algorithm).build();
+            return verifier.verify(token);
+        } catch (Exception e) {
+            return null;
+        }
+    }
 }

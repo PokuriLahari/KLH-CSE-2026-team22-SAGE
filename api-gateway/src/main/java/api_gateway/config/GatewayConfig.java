@@ -11,6 +11,8 @@ public class GatewayConfig {
     @Bean
     public RouteLocator gatewayRoutes(RouteLocatorBuilder builder) {
         return builder.routes()
+            .route("auth-service", r -> r.path("/api/auth/**", "/api/tasks/**", "/api/sage/**", "/api/reminders/**", "/login/**", "/oauth2/**")
+                .uri("lb://AUTH-SERVICE"))
             .route("profile-service", r -> r.path("/api/profile/**")
                 .uri("lb://PROFILE-SERVICE"))
             .build();

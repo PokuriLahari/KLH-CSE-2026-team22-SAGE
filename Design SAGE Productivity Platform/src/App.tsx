@@ -59,6 +59,7 @@ import { Sparkle20Filled } from "@fluentui/react-icons/svg/sparkle"
 import { TargetArrow20Regular } from "@fluentui/react-icons/svg/target-arrow"
 import { Timer20Regular } from "@fluentui/react-icons/svg/timer"
 import { Location20Regular } from "@fluentui/react-icons/svg/location"
+import { Open20Regular } from "@fluentui/react-icons/svg/open"
 import {
   deleteGoogleCalendarEvent,
   disconnectGoogleCalendar,
@@ -81,6 +82,12 @@ import {
   ONBOARDING_STORAGE_KEY,
 } from "./AuthContext"
 import {
+  getUserItem,
+  setUserItem,
+  removeUserItem,
+  getUserScopeKey,
+} from "./userStorage"
+import {
   type TimetableEntry,
   COURSE_CATALOG,
   resolveCourseName,
@@ -89,6 +96,8 @@ import {
   formatTimeRange,
   mergeConsecutivePeriods,
   OFFICIAL_TIMETABLE_SLOTS,
+  getSampleTimetableTemplate,
+  createManualTimetableEntry,
   parseUploadedTimetableFile,
   loadSavedTimetable,
   saveTimetable,
@@ -112,13 +121,22 @@ import {
   dispatchBrowserNotification,
   syncNotificationPreferences,
   normalizeReminder,
+  upsertContestReminder,
+  removeContestReminder,
+  findContestReminder,
+  loadSavedReminders,
+  saveReminders,
 } from "./notifications"
 import {
   type ChatMessage,
   type SageContext,
   askSage,
 } from "./services/sageService"
-import { taskService } from "./services/taskService"
+import {
+  taskService,
+  getStoredLocalTasks,
+  saveStoredLocalTasks,
+} from "./services/taskService"
 import {
   getFocusRecommendation,
   getFocusNowRecommendation,
@@ -136,6 +154,7 @@ import type {
   EventItem,
 } from "./decision/decisionTypes.ts"
 import "./index.css"
+import DiagnosticsDashboard from "./DiagnosticsDashboard"
 
 type Flow = "landing" | "auth" | "onboarding" | "app"
 type View = "Home" | "Tasks" | "Goals" | "Calendar" | "Contests" | "Reminders" | "Progress" | "Ask SAGE" | "Settings"
@@ -1107,9 +1126,7 @@ function Onboarding({
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   })
   const [timetable, setTimetable] = useState<TimetableEntry[]>(() =>
-    initialTimetable && initialTimetable.length > 0
-      ? initialTimetable
-      : mergeConsecutivePeriods(OFFICIAL_TIMETABLE_SLOTS),
+    initialTimetable && initialTimetable.length > 0 ? initialTimetable : [],
   )
   const [events, setEvents] = useState<EventItem[]>([])
   const [goals, setGoals] = useState<Goal[]>([])
@@ -1122,6 +1139,46 @@ function Onboarding({
   const [timetableFile, setTimetableFile] = useState("")
   const [timetablePreview, setTimetablePreview] = useState("")
   const [timetableStatus, setTimetableStatus] = useState("")
+
+  const [manualDay, setManualDay] = useState(1)
+  const [manualCourseCode, setManualCourseCode] = useState("")
+  const [manualCourseName, setManualCourseName] = useState("")
+  const [manualStartPeriod, setManualStartPeriod] = useState(1)
+  const [manualEndPeriod, setManualEndPeriod] = useState(2)
+  const [manualLocation, setManualLocation] = useState("")
+  const [manualError, setManualError] = useState("")
+
+  const handleAddManualClass = () => {
+    if (!manualCourseCode.trim()) {
+      setManualError("Please enter a course code or name.")
+      return
+    }
+    const entry = createManualTimetableEntry({
+      dayOfWeek: manualDay,
+      courseCode: manualCourseCode.trim(),
+      startPeriod: manualStartPeriod,
+      endPeriod: manualEndPeriod,
+      location: manualLocation.trim() || undefined,
+      customCourseName: manualCourseName.trim() || undefined,
+    })
+    if (entry) {
+      setTimetable((prev) => [...prev, entry])
+      setManualCourseCode("")
+      setManualCourseName("")
+      setManualLocation("")
+      setManualError("")
+    } else {
+      setManualError("Invalid period range. Periods must be between 1 and 11.")
+    }
+  }
+
+  const handleLoadSampleTemplate = () => {
+    const template = getSampleTimetableTemplate()
+    setTimetable(template)
+    setTimetableStatus(
+      `✓ Loaded sample curriculum template (${template.length} class blocks). Review or edit before proceeding.`,
+    )
+  }
 
   const [examFile, setExamFile] = useState("")
   const [examPreview, setExamPreview] = useState("")
@@ -1175,10 +1232,16 @@ function Onboarding({
       setTimetablePreview(URL.createObjectURL(file))
     }
     const extracted = await parseUploadedTimetableFile(file)
-    setTimetable(extracted)
-    setTimetableStatus(
-      `✓ ${extracted.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
-    )
+    if (extracted.length > 0) {
+      setTimetable(extracted)
+      setTimetableStatus(
+        `✓ ${extracted.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
+      )
+    } else {
+      setTimetableStatus(
+        "Could not detect timetable data from this file. Please enter your classes manually below.",
+      )
+    }
   }
 
   const handleExamUpload = async (file: File) => {
@@ -1336,12 +1399,154 @@ function Onboarding({
                 statusMessage={timetableStatus}
                 onFileSelect={handleTimetableUpload}
               />
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  marginTop: "8px",
+                  marginBottom: "8px",
+                }}
+              >
+                <Text
+                  size={200}
+                  style={{ color: "var(--colorNeutralForeground3)" }}
+                >
+                  Want to see how SAGE organizes college periods?
+                </Text>
+                <Button
+                  appearance="subtle"
+                  size="small"
+                  onClick={handleLoadSampleTemplate}
+                >
+                  Load Sample Curriculum Template
+                </Button>
+              </div>
+              <div
+                style={{
+                  background: "var(--colorNeutralBackground2)",
+                  padding: "12px",
+                  borderRadius: "var(--borderRadiusMedium)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                }}
+              >
+                <Text weight="semibold" size={200}>
+                  Or Add Class Manually:
+                </Text>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                    gap: "8px",
+                  }}
+                >
+                  <Label size="small">
+                    Day
+                    <Dropdown
+                      value={
+                        [
+                          "Monday",
+                          "Tuesday",
+                          "Wednesday",
+                          "Thursday",
+                          "Friday",
+                          "Saturday",
+                        ][manualDay - 1]
+                      }
+                      onOptionSelect={(_, d) =>
+                        setManualDay(Number(d.optionValue))
+                      }
+                    >
+                      <Option value="1">Monday</Option>
+                      <Option value="2">Tuesday</Option>
+                      <Option value="3">Wednesday</Option>
+                      <Option value="4">Thursday</Option>
+                      <Option value="5">Friday</Option>
+                      <Option value="6">Saturday</Option>
+                    </Dropdown>
+                  </Label>
+                  <Label size="small">
+                    Course Code
+                    <Input
+                      placeholder="e.g. 23CS3105"
+                      value={manualCourseCode}
+                      onChange={(_, d) => setManualCourseCode(d.value)}
+                    />
+                  </Label>
+                  <Label size="small">
+                    Course Name
+                    <Input
+                      placeholder="e.g. Data Systems"
+                      value={manualCourseName}
+                      onChange={(_, d) => setManualCourseName(d.value)}
+                    />
+                  </Label>
+                  <Label size="small">
+                    Periods
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "4px",
+                        alignItems: "center",
+                      }}
+                    >
+                      <Input
+                        type="number"
+                        min={1}
+                        max={11}
+                        value={String(manualStartPeriod)}
+                        onChange={(_, d) =>
+                          setManualStartPeriod(Number(d.value))
+                        }
+                        style={{ width: "60px" }}
+                      />
+                      <span>to</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={11}
+                        value={String(manualEndPeriod)}
+                        onChange={(_, d) => setManualEndPeriod(Number(d.value))}
+                        style={{ width: "60px" }}
+                      />
+                    </div>
+                  </Label>
+                  <Label size="small">
+                    Room
+                    <Input
+                      placeholder="e.g. C-421"
+                      value={manualLocation}
+                      onChange={(_, d) => setManualLocation(d.value)}
+                    />
+                  </Label>
+                </div>
+                {manualError && (
+                  <Text
+                    size={200}
+                    style={{ color: "var(--colorPaletteRedForeground1)" }}
+                  >
+                    {manualError}
+                  </Text>
+                )}
+                <div>
+                  <Button
+                    appearance="secondary"
+                    size="small"
+                    onClick={handleAddManualClass}
+                  >
+                    Add Class Block
+                  </Button>
+                </div>
+              </div>
               <TimetableReviewList
                 items={timetable}
                 remove={(id) =>
                   setTimetable(timetable.filter((t) => t.id !== id))
                 }
-                empty="No timetable loaded yet. Upload your timetable above."
+                empty="No timetable loaded yet. You can upload an image, enter classes above, load a sample template, or click Next to skip."
               />
             </>
           )}
@@ -2325,6 +2530,7 @@ function Workspace({
   focusSessions,
   setFocusSessions,
   signOut,
+  onAccountDeleted,
 }: {
   profile: Profile
   setProfile: (p: Profile) => void
@@ -2347,6 +2553,7 @@ function Workspace({
   focusSessions: FocusSessionRecord[]
   setFocusSessions: React.Dispatch<React.SetStateAction<FocusSessionRecord[]>>
   signOut: () => void
+  onAccountDeleted?: () => void
 }) {
   const [view, setView] = useState<View>("Home")
   const [mobileNav, setMobileNav] = useState(false)
@@ -2428,11 +2635,13 @@ function Workspace({
           const snoozedMs = new Date(r.snoozedUntil).getTime()
           if (!isNaN(snoozedMs) && now.getTime() >= snoozedMs) {
             updated = true
-            if (
+            const canNotify =
               notifications.inApp &&
               notifications.browserNotifications &&
-              !quiet
-            ) {
+              !quiet &&
+              (r.targetType === "contest" ? notifications.contests : true) &&
+              (r.targetType === "task" ? notifications.tasks : true)
+            if (canNotify) {
               dispatchBrowserNotification("SAGE Reminder Due", r.title, () => {
                 setView("Reminders")
                 setNotifPanelOpen(true)
@@ -2453,11 +2662,13 @@ function Workspace({
         if (isReminderDue(r, now)) {
           if (!r.notifiedAt) {
             updated = true
-            if (
+            const canNotify =
               notifications.inApp &&
               notifications.browserNotifications &&
-              !quiet
-            ) {
+              !quiet &&
+              (r.targetType === "contest" ? notifications.contests : true) &&
+              (r.targetType === "task" ? notifications.tasks : true)
+            if (canNotify) {
               dispatchBrowserNotification("SAGE Reminder Due", r.title, () => {
                 setView("Reminders")
                 setNotifPanelOpen(true)
@@ -2476,12 +2687,7 @@ function Workspace({
 
       if (updated) {
         setReminders(nextReminders)
-        try {
-          window.localStorage.setItem(
-            REMINDERS_STORAGE_KEY,
-            JSON.stringify(nextReminders),
-          )
-        } catch {}
+        saveReminders(nextReminders)
       }
     }
 
@@ -2631,7 +2837,12 @@ function Workspace({
         setTimetable={setTimetable}
       />
     ) : view === "Contests" ? (
-      <ContestsScreen platforms={platforms} setPlatforms={setPlatforms} />
+      <ContestsScreen
+        platforms={platforms}
+        setPlatforms={setPlatforms}
+        reminders={reminders}
+        setReminders={setReminders}
+      />
     ) : view === "Reminders" ? (
       <RemindersScreen reminders={reminders} setReminders={setReminders} />
     ) : view === "Progress" ? (
@@ -2671,6 +2882,7 @@ function Workspace({
         setFocusSessions={setFocusSessions}
         go={setView}
         signOut={signOut}
+        onAccountDeleted={onAccountDeleted}
       />
     )
   return (
@@ -4937,9 +5149,13 @@ function CalendarScreen({
 function ContestsScreen({
   platforms,
   setPlatforms,
+  reminders,
+  setReminders,
 }: {
   platforms: string[]
   setPlatforms: React.Dispatch<React.SetStateAction<string[]>>
+  reminders: Reminder[]
+  setReminders: React.Dispatch<React.SetStateAction<Reminder[]>>
 }) {
   const [contests, setContests] = useState<Contest[]>([])
   const [loading, setLoading] = useState(false)
@@ -4949,17 +5165,6 @@ function ContestsScreen({
   const [statusFilter, setStatusFilter] = useState("Upcoming/Ongoing")
   const [dateFilter, setDateFilter] = useState("")
   const [search, setSearch] = useState("")
-  const [reminders, setContestReminders] = useState<Record<string, string>>(
-    () => {
-      try {
-        return JSON.parse(
-          window.localStorage.getItem("sage-contest-reminders") || "{}",
-        ) as Record<string, string>
-      } catch {
-        return {}
-      }
-    },
-  )
   const [success, setSuccess] = useState(false)
   const [now, setNow] = useState(Date.now())
 
@@ -4985,13 +5190,6 @@ function ContestsScreen({
     const timer = window.setInterval(() => setNow(Date.now()), 60000)
     return () => window.clearInterval(timer)
   }, [])
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      "sage-contest-reminders",
-      JSON.stringify(reminders),
-    )
-  }, [reminders])
 
   const relevant = contests
     .filter((contest) => platforms.includes(contest.platform))
@@ -5056,10 +5254,15 @@ function ContestsScreen({
     "2h": "2 hours before",
     "1d": "1 day before",
   }
-  const setReminder = (id: string, value: string) => {
-    setContestReminders((current) => ({ ...current, [id]: value }))
+  const handleSetReminder = (contest: Contest, timingStr: string) => {
+    const timing = (timingStr || "1h") as ReminderTiming
+    setReminders((current) => upsertContestReminder(current, contest, timing))
     setSuccess(true)
     window.setTimeout(() => setSuccess(false), 2400)
+  }
+
+  const handleRemoveReminder = (contestId: string) => {
+    setReminders((current) => removeContestReminder(current, contestId))
   }
 
   if (!platforms.length)
@@ -5201,7 +5404,10 @@ function ContestsScreen({
                   />
                   <div className="contest-list">
                     {items.map((contest) => {
-                      const reminder = reminders[contest.id] || contest.reminder
+                      const reminder = findContestReminder(
+                        reminders,
+                        contest.id,
+                      )
                       const start = new Date(contest.startTime)
                       return (
                         <Card
@@ -5260,14 +5466,22 @@ function ContestsScreen({
                             {reminder ? (
                               <div className="reminder-set">
                                 <Text size={200}>
-                                  Reminder: {reminderLabel[reminder]}
+                                  Reminder:{" "}
+                                  {TIMING_LABELS[reminder.notificationTiming] ||
+                                    reminderLabel[
+                                      reminder.notificationTiming
+                                    ] ||
+                                    reminder.notificationTiming}
                                 </Text>
                                 <div>
                                   <Dropdown
                                     placeholder="Change"
+                                    value={
+                                      TIMING_LABELS[reminder.notificationTiming]
+                                    }
                                     onOptionSelect={(_, data) =>
-                                      setReminder(
-                                        contest.id,
+                                      handleSetReminder(
+                                        contest,
                                         String(data.optionValue),
                                       )
                                     }
@@ -5286,11 +5500,7 @@ function ContestsScreen({
                                   <Button
                                     appearance="subtle"
                                     onClick={() =>
-                                      setContestReminders((current) => {
-                                        const next = { ...current }
-                                        delete next[contest.id]
-                                        return next
-                                      })
+                                      handleRemoveReminder(contest.id)
                                     }
                                   >
                                     Remove
@@ -5300,14 +5510,14 @@ function ContestsScreen({
                             ) : (
                               contest.status !== "ended" && (
                                 <Dropdown
-                                  placeholder="Set Reminder"
+                                  placeholder="Remind me"
                                   onOptionSelect={(_, data) =>
-                                    setReminder(
-                                      contest.id,
+                                    handleSetReminder(
+                                      contest,
                                       String(data.optionValue),
                                     )
                                   }
-                                  aria-label={`Set reminder for ${contest.name}`}
+                                  aria-label={`Remind me about ${contest.name}`}
                                 >
                                   <Option value="10m">10 minutes before</Option>
                                   <Option value="30m">30 minutes before</Option>
@@ -5445,12 +5655,7 @@ function RemindersScreen({
               })
             : r,
         )
-        try {
-          window.localStorage.setItem(
-            REMINDERS_STORAGE_KEY,
-            JSON.stringify(next),
-          )
-        } catch {}
+        saveReminders(next)
         return next
       })
     } else {
@@ -5469,12 +5674,7 @@ function RemindersScreen({
           dismissed: false,
         })
         const next = [...list, newReminder]
-        try {
-          window.localStorage.setItem(
-            REMINDERS_STORAGE_KEY,
-            JSON.stringify(next),
-          )
-        } catch {}
+        saveReminders(next)
         return next
       })
     }
@@ -5494,9 +5694,7 @@ function RemindersScreen({
             }
           : r,
       )
-      try {
-        window.localStorage.setItem(REMINDERS_STORAGE_KEY, JSON.stringify(next))
-      } catch {}
+      saveReminders(next)
       return next
     })
   }
@@ -5515,9 +5713,7 @@ function RemindersScreen({
             }
           : r,
       )
-      try {
-        window.localStorage.setItem(REMINDERS_STORAGE_KEY, JSON.stringify(next))
-      } catch {}
+      saveReminders(next)
       return next
     })
   }
@@ -5551,9 +5747,7 @@ function RemindersScreen({
             }
           : r,
       )
-      try {
-        window.localStorage.setItem(REMINDERS_STORAGE_KEY, JSON.stringify(next))
-      } catch {}
+      saveReminders(next)
       return next
     })
   }
@@ -5569,9 +5763,7 @@ function RemindersScreen({
           r.id === id ? { ...r, dismissed: true, read: true } : r,
         )
       }
-      try {
-        window.localStorage.setItem(REMINDERS_STORAGE_KEY, JSON.stringify(next))
-      } catch {}
+      saveReminders(next)
       return next
     })
   }
@@ -5656,6 +5848,11 @@ function RemindersScreen({
                       <Text weight="semibold" strikethrough={isCompleted}>
                         {r.title}
                       </Text>
+                      {r.targetType === "contest" && (
+                        <Badge appearance="tint" color="brand">
+                          {r.platform || "Contest"}
+                        </Badge>
+                      )}
                       {isCompleted && (
                         <Badge appearance="tint" color="success">
                           Completed
@@ -5692,8 +5889,44 @@ function RemindersScreen({
                       size={200}
                       style={{ color: "var(--colorNeutralForeground3)" }}
                     >
-                      {formatShortDate(r.date)} · {r.time} · {r.method}
+                      {r.targetType === "contest" && r.eventStartTime ? (
+                        <>
+                          Contest starts:{" "}
+                          {new Date(r.eventStartTime).toLocaleString([], {
+                            month: "short",
+                            day: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}{" "}
+                          · Reminder: {formatShortDate(r.date)} {r.time} ·{" "}
+                          {r.method}
+                        </>
+                      ) : (
+                        <>
+                          {formatShortDate(r.date)} · {r.time} · {r.method}
+                        </>
+                      )}
                     </Text>
+                    {r.contestUrl && (
+                      <div style={{ marginTop: "4px" }}>
+                        <a
+                          href={r.contestUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                            fontSize: "12px",
+                            color: "var(--colorBrandForeground1)",
+                            textDecoration: "none",
+                          }}
+                        >
+                          <Open20Regular style={{ fontSize: "14px" }} />
+                          View Contest
+                        </a>
+                      </div>
+                    )}
                   </div>
                   <div
                     className="button-row"
@@ -6838,6 +7071,7 @@ function SettingsScreen({
   setFocusSessions,
   go,
   signOut,
+  onAccountDeleted,
 }: {
   profile: Profile
   setProfile: (p: Profile) => void
@@ -6858,8 +7092,12 @@ function SettingsScreen({
   setFocusSessions: React.Dispatch<React.SetStateAction<FocusSessionRecord[]>>
   go: (v: View) => void
   signOut: () => void
+  onAccountDeleted?: () => void
 }) {
+  const { deleteAccount } = useAuth()
   const [section, setSection] = useState("Profile")
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const sections = [
     "Profile",
     "Schedule",
@@ -6959,37 +7197,38 @@ function SettingsScreen({
     }
   }
 
-  const handleDeleteAccount = () => {
+  const handleDeleteAccount = async () => {
     if (
       window.confirm(
-        "Are you sure you want to permanently delete your account? All your login credentials, profile, tasks, goals, timetable, reminders, and settings will be permanently erased.",
+        "Are you sure you want to permanently delete your account? All your login credentials, profile, tasks, goals, timetable, reminders, and settings will be permanently erased. This cannot be undone.",
       )
     ) {
-      const keys = [
-        "sage-user-profile",
-        "sage-tasks",
-        "sage-goals",
-        "sage-events",
-        "sage-timetable",
-        USER_PREFERENCES_STORAGE_KEY,
-        PLATFORMS_STORAGE_KEY,
-        NOTIFICATIONS_STORAGE_KEY,
-        REMINDERS_STORAGE_KEY,
-        FOCUS_SESSIONS_STORAGE_KEY,
-        "sage-contest-reminders",
-        "sage_google_calendar_token",
-        "sage_google_calendar_token_exp",
-        "sage_google_calendar_connected",
-        "sage_custom_google_client_id",
-        "sage_auth_user",
-        "sage_onboarding_completed",
-      ]
-      for (const k of keys) {
-        window.localStorage.removeItem(k)
-        window.sessionStorage.removeItem(k)
+      setIsDeleting(true)
+      setDeleteError(null)
+      try {
+        const ok = await deleteAccount()
+        if (ok) {
+          setEvents([])
+          setTimetable([])
+          setFocusSessions([])
+          disconnectGoogleCalendar()
+          if (onAccountDeleted) {
+            onAccountDeleted()
+          } else {
+            window.location.href = "/?deleted=true"
+          }
+        } else {
+          setDeleteError(
+            "Account deletion could not be completed on the server. Your data was not deleted.",
+          )
+        }
+      } catch (err: unknown) {
+        setDeleteError(
+          "Permanent account deletion failed. Please check your network connection and try again.",
+        )
+      } finally {
+        setIsDeleting(false)
       }
-      signOut()
-      window.location.href = "/"
     }
   }
 
@@ -7560,14 +7799,39 @@ function SettingsScreen({
                   size={200}
                   style={{ color: "var(--colorNeutralForeground2)" }}
                 >
-                  Permanently remove your account and all workspace data from
-                  this device, including your sign-in session.
+                  Permanently remove your account, cloud profile, tasks,
+                  timetable, and all associated personal data. This action is
+                  irreversible.
                 </Text>
                 <div style={{ marginTop: "8px" }}>
-                  <Button appearance="primary" onClick={handleDeleteAccount}>
-                    Delete Account & Sign Out
+                  <Button
+                    appearance="primary"
+                    disabled={isDeleting}
+                    onClick={handleDeleteAccount}
+                    style={{
+                      background: "var(--colorPaletteRedBackground3, #d13438)",
+                      borderColor:
+                        "var(--colorPaletteRedBorderActive, #a80000)",
+                    }}
+                  >
+                    {isDeleting
+                      ? "Deleting Account..."
+                      : "Permanently Delete Account"}
                   </Button>
                 </div>
+                {deleteError && (
+                  <Text
+                    size={200}
+                    style={{
+                      display: "block",
+                      marginTop: "8px",
+                      color: "var(--colorPaletteRedForeground1, #c42b1c)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {deleteError}
+                  </Text>
+                )}
               </div>
             </div>
           )}
@@ -7585,6 +7849,23 @@ function AppContent() {
     hasCompletedOnboarding,
     loginWithUser,
   } = useAuth()
+
+  const [accountDeletedMessage, setAccountDeletedMessage] =
+    useState<string | null>(() => {
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search)
+        if (params.get("deleted") === "true") {
+          const newUrl = window.location.pathname
+          window.history.replaceState({}, document.title, newUrl)
+          return "Your SAGE account and all associated personal data have been permanently deleted."
+        }
+      }
+      return null
+    })
+
+  if (typeof window !== "undefined" && window.location.pathname === "/dev/diagnostics") {
+    return <DiagnosticsDashboard />
+  }
 
   const [flow, setFlow] = useState<Flow>(() => {
     const path = typeof window !== "undefined" ? window.location.pathname : ""
@@ -7612,34 +7893,37 @@ function AppContent() {
   )
 
   const [profile, setProfile] = useState<Profile>(() => {
-    try {
-      const saved = window.localStorage.getItem("sage-user-profile")
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return {
-      name: user?.name || "",
-      email: user?.email || "",
-      college: "",
-      course: "",
-      year: "",
-      timezone: "",
-    }
+    return (
+      getUserItem<Profile>("sage-user-profile", user) || {
+        name: user?.name || "",
+        email: user?.email || "",
+        college: "",
+        course: "",
+        year: "",
+        timezone: "",
+      }
+    )
   })
 
   const [tasks, setTasks] = useState<Task[]>(() => {
-    try {
-      const saved = window.localStorage.getItem("sage-tasks")
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return []
+    return getStoredLocalTasks(user)
   })
 
   useEffect(() => {
     let isMounted = true
+    if (!user || !user.authenticated) {
+      setTasks([])
+      return
+    }
     taskService
       .getTasks()
       .then((serverTasks) => {
-        if (isMounted && Array.isArray(serverTasks) && serverTasks.length > 0) {
+        if (
+          isMounted &&
+          user?.authenticated &&
+          Array.isArray(serverTasks) &&
+          serverTasks.length > 0
+        ) {
           setTasks(serverTasks)
         }
       })
@@ -7647,24 +7931,17 @@ function AppContent() {
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [user?.id, user?.email, user?.authenticated])
 
   const [goals, setGoals] = useState<Goal[]>(() => {
-    try {
-      const saved = window.localStorage.getItem("sage-goals")
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return []
+    return getUserItem<Goal[]>("sage-goals", user) || []
   })
 
   const [events, setEvents] = useState<EventItem[]>(() => {
-    try {
-      const saved = window.localStorage.getItem("sage-events")
-      if (saved) {
-        const parsed = JSON.parse(saved)
-        return syncEventsToCurrentWeek(parsed)
-      }
-    } catch {}
+    const saved = getUserItem<EventItem[]>("sage-events", user)
+    if (saved && Array.isArray(saved)) {
+      return syncEventsToCurrentWeek(saved)
+    }
     return []
   })
 
@@ -7673,7 +7950,7 @@ function AppContent() {
       setEvents((current) => {
         const synced = syncEventsToCurrentWeek(current)
         if (JSON.stringify(synced) !== JSON.stringify(current)) {
-          window.localStorage.setItem("sage-events", JSON.stringify(synced))
+          setUserItem("sage-events", synced, user)
           return synced
         }
         return current
@@ -7686,116 +7963,125 @@ function AppContent() {
       clearInterval(interval)
       window.removeEventListener("focus", syncCurrent)
     }
-  }, [])
+  }, [user])
 
   const [preferences, setPreferences] = useState<UserPreferences>(() => {
-    try {
-      const saved = window.localStorage.getItem(USER_PREFERENCES_STORAGE_KEY)
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return DEFAULT_USER_PREFERENCES
+    return (
+      getUserItem<UserPreferences>(USER_PREFERENCES_STORAGE_KEY, user) ||
+      DEFAULT_USER_PREFERENCES
+    )
   })
 
   const [notifications, setNotifications] = useState<NotificationPreferences>(
     () => {
-      try {
-        const saved = window.localStorage.getItem(NOTIFICATIONS_STORAGE_KEY)
-        if (saved) return JSON.parse(saved)
-      } catch {}
-      return DEFAULT_NOTIFICATION_PREFERENCES
+      return (
+        getUserItem<NotificationPreferences>(NOTIFICATIONS_STORAGE_KEY, user) ||
+        DEFAULT_NOTIFICATION_PREFERENCES
+      )
     },
   )
 
   const [platforms, setPlatforms] = useState<string[]>(() => {
-    try {
-      const saved = window.localStorage.getItem(PLATFORMS_STORAGE_KEY)
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return []
+    return getUserItem<string[]>(PLATFORMS_STORAGE_KEY, user) || []
   })
 
   const [reminders, setReminders] = useState<Reminder[]>(() => {
-    try {
-      const saved = window.localStorage.getItem(REMINDERS_STORAGE_KEY)
-      if (saved) return JSON.parse(saved)
-    } catch {}
-    return []
+    return loadSavedReminders(user)
   })
 
   const [focusSessions, setFocusSessions] = useState<FocusSessionRecord[]>(
     () => {
-      try {
-        const saved = window.localStorage.getItem(FOCUS_SESSIONS_STORAGE_KEY)
-        if (saved) return JSON.parse(saved)
-      } catch {}
-      return []
+      return (
+        getUserItem<FocusSessionRecord[]>(FOCUS_SESSIONS_STORAGE_KEY, user) ||
+        []
+      )
     },
   )
 
   const [timetable, setTimetable] = useState<TimetableEntry[]>(() => {
-    const saved = loadSavedTimetable()
+    const saved = loadSavedTimetable(user)
     if (saved && saved.length > 0) return saved
-    return mergeConsecutivePeriods(OFFICIAL_TIMETABLE_SLOTS)
+    return []
   })
 
+  // Synchronize scoped state whenever user switches accounts
   useEffect(() => {
-    if (timetable && timetable.length > 0) {
-      saveTimetable(timetable)
-    }
-  }, [timetable])
+    if (!user) return
+    setProfile(
+      getUserItem<Profile>("sage-user-profile", user) || {
+        name: user.name || "",
+        email: user.email || "",
+        college: "",
+        course: "",
+        year: "",
+        timezone: "",
+      },
+    )
+    setTasks(getStoredLocalTasks(user))
+    setGoals(getUserItem<Goal[]>("sage-goals", user) || [])
+    const savedEvents = getUserItem<EventItem[]>("sage-events", user)
+    setEvents(
+      savedEvents && Array.isArray(savedEvents)
+        ? syncEventsToCurrentWeek(savedEvents)
+        : [],
+    )
+    setPreferences(
+      getUserItem<UserPreferences>(USER_PREFERENCES_STORAGE_KEY, user) ||
+        DEFAULT_USER_PREFERENCES,
+    )
+    setNotifications(
+      getUserItem<NotificationPreferences>(NOTIFICATIONS_STORAGE_KEY, user) ||
+        DEFAULT_NOTIFICATION_PREFERENCES,
+    )
+    setPlatforms(getUserItem<string[]>(PLATFORMS_STORAGE_KEY, user) || [])
+    setReminders(loadSavedReminders(user))
+    setFocusSessions(
+      getUserItem<FocusSessionRecord[]>(FOCUS_SESSIONS_STORAGE_KEY, user) || [],
+    )
+    setTimetable(loadSavedTimetable(user) || [])
+  }, [user?.id, user?.email])
+
+  useEffect(() => {
+    saveTimetable(timetable, user)
+  }, [timetable, user])
 
   useEffect(() => {
     if (profile.email) {
-      window.localStorage.setItem("sage-user-profile", JSON.stringify(profile))
+      setUserItem("sage-user-profile", profile, user)
     }
-  }, [profile])
+  }, [profile, user])
 
   useEffect(() => {
-    window.localStorage.setItem("sage-tasks", JSON.stringify(tasks))
-  }, [tasks])
+    saveStoredLocalTasks(tasks, user)
+  }, [tasks, user])
 
   useEffect(() => {
-    window.localStorage.setItem("sage-goals", JSON.stringify(goals))
-  }, [goals])
+    setUserItem("sage-goals", goals, user)
+  }, [goals, user])
 
   useEffect(() => {
-    window.localStorage.setItem("sage-events", JSON.stringify(events))
-  }, [events])
+    setUserItem("sage-events", events, user)
+  }, [events, user])
 
   useEffect(() => {
-    window.localStorage.setItem(
-      USER_PREFERENCES_STORAGE_KEY,
-      JSON.stringify(preferences),
-    )
-  }, [preferences])
+    setUserItem(USER_PREFERENCES_STORAGE_KEY, preferences, user)
+  }, [preferences, user])
 
   useEffect(() => {
-    window.localStorage.setItem(
-      PLATFORMS_STORAGE_KEY,
-      JSON.stringify(platforms),
-    )
-  }, [platforms])
+    setUserItem(PLATFORMS_STORAGE_KEY, platforms, user)
+  }, [platforms, user])
 
   useEffect(() => {
-    window.localStorage.setItem(
-      NOTIFICATIONS_STORAGE_KEY,
-      JSON.stringify(notifications),
-    )
-  }, [notifications])
+    setUserItem(NOTIFICATIONS_STORAGE_KEY, notifications, user)
+  }, [notifications, user])
 
   useEffect(() => {
-    window.localStorage.setItem(
-      REMINDERS_STORAGE_KEY,
-      JSON.stringify(reminders),
-    )
-  }, [reminders])
+    saveReminders(reminders, user)
+  }, [reminders, user])
 
   useEffect(() => {
-    window.localStorage.setItem(
-      FOCUS_SESSIONS_STORAGE_KEY,
-      JSON.stringify(focusSessions),
-    )
-  }, [focusSessions])
+    setUserItem(FOCUS_SESSIONS_STORAGE_KEY, focusSessions, user)
+  }, [focusSessions, user])
 
   const navigateTo = (path: string) => {
     if (typeof window !== "undefined") {
@@ -7867,11 +8153,82 @@ function AppContent() {
   const handleSignOut = () => {
     signOut()
     disconnectGoogleCalendar()
+    setTasks([])
+    setGoals([])
+    setEvents([])
+    setReminders([])
+    setTimetable([])
+    setFocusSessions([])
+    setPlatforms([])
+    navigateTo("/")
+  }
+
+  const handleAccountDeleted = () => {
+    disconnectGoogleCalendar()
+    setTasks([])
+    setGoals([])
+    setEvents([])
+    setReminders([])
+    setTimetable([])
+    setFocusSessions([])
+    setPlatforms([])
+    setEmail("")
+    setAuthenticatedName("")
+    setProfile({
+      name: "",
+      email: "",
+      college: "",
+      course: "",
+      year: "",
+      timezone: "",
+    })
+    setAccountDeletedMessage(
+      "Your SAGE account and all associated personal data have been permanently deleted.",
+    )
     navigateTo("/")
   }
 
   return (
     <>
+      {accountDeletedMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: "16px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 9999,
+            backgroundColor: "#dff6dd",
+            color: "#107c41",
+            padding: "12px 24px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+            border: "1px solid #92c353",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            fontSize: "14px",
+            fontWeight: 600,
+          }}
+        >
+          <span>✓ {accountDeletedMessage}</span>
+          <button
+            onClick={() => setAccountDeletedMessage(null)}
+            style={{
+              background: "transparent",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 700,
+              fontSize: "16px",
+              color: "inherit",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {flow === "landing" ? (
         <Landing start={authenticate} />
       ) : flow === "auth" ? (
@@ -7890,17 +8247,27 @@ function AppContent() {
           initialPlatforms={platforms}
           finish={(data) => {
             setProfile(data.profile)
-            setEvents(syncEventsToCurrentWeek(data.events))
+            setUserItem("sage-user-profile", data.profile, user)
+            const syncedEvents = syncEventsToCurrentWeek(data.events)
+            setEvents(syncedEvents)
+            setUserItem("sage-events", syncedEvents, user)
             setGoals(data.goals)
+            setUserItem("sage-goals", data.goals, user)
             setPlatforms(data.platforms)
+            setUserItem(PLATFORMS_STORAGE_KEY, data.platforms, user)
             setPreferences(data.preferences)
+            setUserItem(USER_PREFERENCES_STORAGE_KEY, data.preferences, user)
             setNotifications(data.notifications)
-            if (data.reminders) setReminders(data.reminders)
-            if (data.timetable && data.timetable.length > 0) {
-              setTimetable(data.timetable)
-              saveTimetable(data.timetable)
+            setUserItem(NOTIFICATIONS_STORAGE_KEY, data.notifications, user)
+            if (data.reminders) {
+              setReminders(data.reminders)
+              saveReminders(data.reminders, user)
             }
-            completeOnboarding()
+            if (data.timetable) {
+              setTimetable(data.timetable)
+              saveTimetable(data.timetable, user)
+            }
+            completeOnboarding(data.profile)
             navigateTo("/home")
           }}
         />
@@ -7927,6 +8294,7 @@ function AppContent() {
           focusSessions={focusSessions}
           setFocusSessions={setFocusSessions}
           signOut={handleSignOut}
+          onAccountDeleted={handleAccountDeleted}
         />
       )}
     </>

@@ -1,3 +1,4 @@
+import { classifyEndpoint, recordDiagnostic, redact } from "../diagnostics.ts"
 // ==================================================
 // SAGE CENTRALIZED API CLIENT
 // ==================================================
@@ -9,13 +10,21 @@
 // ==================================================
 
 export class ApiError extends Error {
+  status: number
+  data?: unknown
+  requestId?: string
+
   constructor(
-    public status: number,
+    status: number,
     message: string,
-    public data?: unknown,
+    data?: unknown,
+    requestId?: string,
   ) {
     super(message)
     this.name = "ApiError"
+    this.status = status
+    this.data = data
+    this.requestId = requestId
   }
 }
 
@@ -41,26 +50,29 @@ export function clearStoredToken(): void {
   if (typeof window === "undefined") return
   try {
     localStorage.removeItem(TOKEN_KEY)
+    document.cookie =
+      "sage_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; max-age=0"
   } catch {}
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string || "/api"
+const API_BASE_URL =
+  (typeof import.meta !== "undefined" &&
+    import.meta.env &&
+    (import.meta.env.VITE_API_BASE_URL as string)) ||
+  "/api"
 
 /**
  * Normalizes user-safe error message avoiding technical jargon
  */
-function sanitizeErrorMessage(status: number, rawMessage?: string): string {
-  if (status === 401) {
-    return "Your session has expired. Please sign in again."
-  }
-  if (status === 403) {
-    return "You don't have permission to perform this action."
-  }
-  if (status === 404) {
-    return "The requested resource could not be found."
-  }
-  if (status >= 500) {
-    return "Something went wrong while loading your information."
+function sanitizeErrorMessage(
+  status: number,
+  rawMessage?: string,
+  isAuthEndpoint?: boolean,
+): string {
+  if (status === 502 || status === 503 || rawMessage === "Service Unavailable") {
+    return isAuthEndpoint
+      ? "Authentication service is temporarily unavailable or starting up. Please try again in a moment."
+      : "The service is temporarily unavailable. Please try again in a moment."
   }
   if (
     rawMessage &&
@@ -71,6 +83,20 @@ function sanitizeErrorMessage(status: number, rawMessage?: string): string {
     !rawMessage.includes("SQL")
   ) {
     return rawMessage
+  }
+  if (status === 401) {
+    return isAuthEndpoint
+      ? "Authentication failed. Please check your credentials and try again."
+      : "Your session has expired. Please sign in again."
+  }
+  if (status === 403) {
+    return "You don't have permission to perform this action."
+  }
+  if (status === 404) {
+    return "The requested resource could not be found."
+  }
+  if (status >= 500) {
+    return "Something went wrong while loading your information."
   }
   return "We couldn't connect to SAGE right now. Please try again in a moment."
 }
@@ -85,6 +111,8 @@ async function request<T>(
     : `${API_BASE_URL}${cleanEndpoint}`
 
   const headers = new Headers(options.headers || {})
+  const requestId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
+  headers.set("X-Request-Id", requestId)
 
   if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json")
@@ -95,18 +123,12 @@ async function request<T>(
     headers.set("Authorization", `Bearer ${token}`)
   }
 
+  const startedAt = performance.now()
   try {
     const response = await fetch(url, {
       ...options,
       headers,
     })
-
-    if (response.status === 401) {
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("sage:unauthorized"))
-      }
-      throw new ApiError(401, sanitizeErrorMessage(401))
-    }
 
     if (response.status === 204) {
       return {} as T
@@ -135,10 +157,25 @@ async function request<T>(
         if (typeof obj.message === "string") rawMsg = obj.message
         else if (typeof obj.error === "string") rawMsg = obj.error
       }
+
+      const isAuthEndpoint =
+        cleanEndpoint.startsWith("/auth/google") ||
+        cleanEndpoint.startsWith("/auth/login")
+
+      if (response.status === 401 && !isAuthEndpoint) {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("sage:unauthorized"))
+        }
+      }
+
+      const serverRequestId = response.headers.get("X-Request-Id") || (data && typeof data === "object" ? String((data as Record<string, unknown>).requestId || "") : "") || requestId
+      const message = sanitizeErrorMessage(response.status, rawMsg, isAuthEndpoint)
+      recordDiagnostic({ severity: response.status >= 500 || response.status === 0 ? "error" : "warning", source: classifyEndpoint(cleanEndpoint), title: "Failed API request", message, observed: true, method: options.method || "GET", endpoint: cleanEndpoint, status: response.status, durationMs: Math.round(performance.now() - startedAt), requestId: serverRequestId, details: redact({ response: data }) as Record<string, unknown> })
       throw new ApiError(
         response.status,
-        sanitizeErrorMessage(response.status, rawMsg),
+        message,
         data,
+        serverRequestId,
       )
     }
 
@@ -150,9 +187,13 @@ async function request<T>(
     if (err instanceof DOMException && err.name === "AbortError") {
       throw err
     }
+    const message = err instanceof TypeError ? "Network request failed. This may be an unavailable service, connection refusal, or a browser CORS restriction." : "We couldn't connect to SAGE right now. Please try again in a moment."
+    recordDiagnostic({ severity: "error", source: "Network", title: "Network request failed", message, observed: true, method: options.method || "GET", endpoint: cleanEndpoint, status: 0, durationMs: Math.round(performance.now() - startedAt), requestId, details: redact({ error: err instanceof Error ? err.message : String(err), suspectedCause: "Browsers do not expose a definitive CORS cause; this is an observed network failure." }) as Record<string, unknown> })
     throw new ApiError(
       0,
-      "We couldn't connect to SAGE right now. Please try again in a moment.",
+      message,
+      undefined,
+      requestId,
     )
   }
 }
