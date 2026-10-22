@@ -95,33 +95,68 @@ declare global {
   }
 }
 
-const DEFAULT_CLIENT_ID =
+export const DEFAULT_CLIENT_ID =
   "832115590292-i3h1b0qs87tahau5gq653ifdf5mum93r.apps.googleusercontent.com"
 const TOKEN_KEY = "sage_google_calendar_token"
 const TOKEN_EXP_KEY = "sage_google_calendar_token_exp"
 const CONNECTED_FLAG_KEY = "sage_google_calendar_connected"
 const CUSTOM_CLIENT_ID_KEY = "sage_google_client_id"
 
+const GOOGLE_CLIENT_ID_PATTERN =
+  /^\d+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/
+
+/**
+ * Sanitizes and validates a Google OAuth Client ID string.
+ * Trims whitespace and outer quotes, and validates against Google's client ID pattern.
+ * Returns null if the candidate ID is invalid, malformed, or empty.
+ */
+export function sanitizeGoogleClientId(id?: string | null): string | null {
+  if (!id || typeof id !== "string") return null
+  const cleaned = id.trim().replace(/^["']|["']$/g, "").trim()
+  if (GOOGLE_CLIENT_ID_PATTERN.test(cleaned)) {
+    return cleaned
+  }
+  return null
+}
+
 let inMemoryToken = ""
 
 /**
- * Returns the active Google Client ID
+ * Returns the active Google Client ID.
+ * Priority:
+ * 1. Valid custom client ID from localStorage
+ * 2. Valid client ID from environment variable (VITE_GOOGLE_CLIENT_ID)
+ * 3. Default verified production client ID (DEFAULT_CLIENT_ID)
+ *
+ * Any malformed, corrupted, or invalid client ID is safely rejected and falls back.
  */
-export function getGoogleClientId(): string {
+export function getGoogleClientId(envOverride?: string): string {
   if (typeof window !== "undefined") {
     try {
       const custom = window.localStorage.getItem(CUSTOM_CLIENT_ID_KEY)
-      if (custom && custom.trim()) return custom.trim()
+      const validCustom = sanitizeGoogleClientId(custom)
+      if (validCustom) return validCustom
     } catch {}
   }
-  return import.meta.env.VITE_GOOGLE_CLIENT_ID || DEFAULT_CLIENT_ID
+
+  const rawEnv =
+    envOverride !== undefined
+      ? envOverride
+      : typeof import.meta !== "undefined" && import.meta.env
+        ? import.meta.env.VITE_GOOGLE_CLIENT_ID
+        : undefined
+  const validEnv = sanitizeGoogleClientId(rawEnv)
+  if (validEnv) return validEnv
+
+  return DEFAULT_CLIENT_ID
 }
 
 export function setCustomGoogleClientId(id: string): void {
   if (typeof window !== "undefined") {
     try {
-      if (id && id.trim()) {
-        window.localStorage.setItem(CUSTOM_CLIENT_ID_KEY, id.trim())
+      const sanitized = sanitizeGoogleClientId(id)
+      if (sanitized) {
+        window.localStorage.setItem(CUSTOM_CLIENT_ID_KEY, sanitized)
       } else {
         window.localStorage.removeItem(CUSTOM_CLIENT_ID_KEY)
       }
@@ -132,7 +167,8 @@ export function setCustomGoogleClientId(id: string): void {
 export function getCustomGoogleClientId(): string {
   if (typeof window !== "undefined") {
     try {
-      return window.localStorage.getItem(CUSTOM_CLIENT_ID_KEY) || ""
+      const stored = window.localStorage.getItem(CUSTOM_CLIENT_ID_KEY)
+      return sanitizeGoogleClientId(stored) || ""
     } catch {}
   }
   return ""

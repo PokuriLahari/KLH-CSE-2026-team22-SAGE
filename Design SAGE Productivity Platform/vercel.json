@@ -4,7 +4,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://sage-backend.onrender.com/api/$1"
+      "destination": "https://sage-auth-service.onrender.com/api/$1"
     },
     {
       "source": "/(.*)",
