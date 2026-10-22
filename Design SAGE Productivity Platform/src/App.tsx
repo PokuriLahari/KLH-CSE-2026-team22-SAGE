@@ -99,6 +99,7 @@ import {
   getSampleTimetableTemplate,
   createManualTimetableEntry,
   parseUploadedTimetableFile,
+  fileToDataUrl,
   loadSavedTimetable,
   saveTimetable,
   getClassesForDay,
@@ -124,14 +125,34 @@ import {
   upsertContestReminder,
   removeContestReminder,
   findContestReminder,
+  getReminderTriggerTime,
   loadSavedReminders,
   saveReminders,
+  upsertTaskDeadlineReminder,
+  removeTaskDeadlineReminder,
+  buildTaskDeadlineReminder,
 } from "./notifications"
+import {
+  getTaskDeadlineInfo,
+  getReminderVisualInfo,
+  formatFriendlyDate,
+} from "./dateTimeUtils"
 import {
   type ChatMessage,
   type SageContext,
   askSage,
 } from "./services/sageService"
+import AskSageChatbot from "./components/AskSageChatbot"
+import InAppNotificationBanner from "./components/InAppNotificationBanner"
+import {
+  syncReminderToBackend,
+  getBackendReminders,
+  updateBackendReminderStatus,
+  deleteBackendReminder,
+  sendTestReminderEmail,
+  backendReminderToFrontend,
+  type BackendReminder,
+} from "./services/reminderService"
 import {
   taskService,
   getStoredLocalTasks,
@@ -719,6 +740,54 @@ function syncEventsToCurrentWeek(
 }
 
 async function parseUploadedExamFile(file: File): Promise<EventItem[]> {
+  if (!file) return []
+
+  const isImageOrPdf =
+    file.type.startsWith("image/") ||
+    file.type === "application/pdf" ||
+    /\.(png|jpe?g|webp|gif|pdf)$/i.test(file.name)
+
+  if (isImageOrPdf) {
+    try {
+      const dataUrl = await fileToDataUrl(file)
+      const prompt =
+        "Please inspect this uploaded exam schedule, test announcement, or notification image/document. Extract all upcoming exams, midterms, finals, tests, or quizzes into the structured ```sage-action``` tasks format with: title (course code and exam name), dueDate (YYYY-MM-DD), dueTime (HH:mm), priority='HIGH', and category='Exam'."
+
+      const res = await askSage({
+        message: prompt,
+        attachment: {
+          mimeType:
+            file.type ||
+            (file.name.toLowerCase().endsWith(".pdf")
+              ? "application/pdf"
+              : "image/png"),
+          data: dataUrl,
+          name: file.name,
+        },
+      })
+
+      const match = res.message.match(/```sage-action\s*([\s\S]*?)\s*```/i)
+      if (match) {
+        const parsed = JSON.parse(match[1])
+        const tasks = parsed.tasks || parsed.items || []
+        if (Array.isArray(tasks) && tasks.length > 0) {
+          return tasks.map((t: any, idx: number) => ({
+            id: Date.now() + idx,
+            title: t.title || "Exam",
+            type: "Exam" as const,
+            date: t.dueDate || new Date().toISOString().slice(0, 10),
+            time: t.dueTime || "09:30",
+            endTime: "",
+            isRecurring: false,
+            originalFileName: file.name,
+          }))
+        }
+      }
+    } catch (e) {
+      console.warn("AI exam image parsing error:", e)
+    }
+  }
+
   try {
     const text = await file.text()
     if (text && text.length > 10) {
@@ -857,12 +926,16 @@ function UploadReview({
   uploaded,
   previewUrl,
   statusMessage,
+  isExtracting = false,
+  isError = false,
   onFileSelect,
 }: {
   label: string
   uploaded: string
   previewUrl?: string
   statusMessage?: string
+  isExtracting?: boolean
+  isError?: boolean
   onFileSelect: (file: File) => void
 }) {
   return (
@@ -883,12 +956,30 @@ function UploadReview({
           </Text>
           <Text size={200}>
             {uploaded
-              ? "Extracted and mapped to current date/time. Review and edit any items below."
+              ? isExtracting
+                ? "Analyzing document with SAGE Multimodal AI (Google Gemini)..."
+                : "Extracted and mapped to current date/time. Review and edit any items below."
               : "Upload an image (PNG, JPG) or PDF of your timetable or schedule."}
           </Text>
+          {isExtracting && (
+            <div style={{ marginTop: "6px" }}>
+              <ProgressBar />
+            </div>
+          )}
           {statusMessage && (
-            <div className="upload-status-sync">
-              <CheckmarkCircle20Filled />
+            <div
+              className="upload-status-sync"
+              style={{
+                color: isError ? "var(--colorPaletteRedForeground1)" : undefined,
+              }}
+            >
+              {isError ? (
+                <Alert20Regular style={{ color: "var(--colorPaletteRedForeground1)" }} />
+              ) : isExtracting ? (
+                <Sparkle20Filled />
+              ) : (
+                <CheckmarkCircle20Filled />
+              )}
               <Text size={200} weight="semibold">
                 {statusMessage}
               </Text>
@@ -899,6 +990,7 @@ function UploadReview({
           className="file-input"
           type={"file" as never}
           accept="image/*,.pdf"
+          disabled={isExtracting}
           aria-label={label}
           onChange={(e) => {
             const file = e.target.files?.[0]
@@ -1139,6 +1231,8 @@ function Onboarding({
   const [timetableFile, setTimetableFile] = useState("")
   const [timetablePreview, setTimetablePreview] = useState("")
   const [timetableStatus, setTimetableStatus] = useState("")
+  const [isTimetableExtracting, setIsTimetableExtracting] = useState(false)
+  const [isTimetableError, setIsTimetableError] = useState(false)
 
   const [manualDay, setManualDay] = useState(1)
   const [manualCourseCode, setManualCourseCode] = useState("")
@@ -1175,6 +1269,7 @@ function Onboarding({
   const handleLoadSampleTemplate = () => {
     const template = getSampleTimetableTemplate()
     setTimetable(template)
+    setIsTimetableError(false)
     setTimetableStatus(
       `✓ Loaded sample curriculum template (${template.length} class blocks). Review or edit before proceeding.`,
     )
@@ -1183,6 +1278,8 @@ function Onboarding({
   const [examFile, setExamFile] = useState("")
   const [examPreview, setExamPreview] = useState("")
   const [examStatus, setExamStatus] = useState("")
+  const [isExamExtracting, setIsExamExtracting] = useState(false)
+  const [isExamError, setIsExamError] = useState(false)
 
   const [preferences, setPreferences] = useState<UserPreferences>(
     () => initialPreferences || DEFAULT_USER_PREFERENCES,
@@ -1231,16 +1328,31 @@ function Onboarding({
     if (file.type.startsWith("image/")) {
       setTimetablePreview(URL.createObjectURL(file))
     }
-    const extracted = await parseUploadedTimetableFile(file)
-    if (extracted.length > 0) {
-      setTimetable(extracted)
+    setIsTimetableExtracting(true)
+    setIsTimetableError(false)
+    setTimetableStatus("")
+    try {
+      const extracted = await parseUploadedTimetableFile(file)
+      if (extracted.length > 0) {
+        setTimetable(extracted)
+        setIsTimetableError(false)
+        setTimetableStatus(
+          `✓ ${extracted.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
+        )
+      } else {
+        setIsTimetableError(true)
+        setTimetableStatus(
+          "Could not detect timetable data from this image or file. Please load the sample template or enter classes manually below.",
+        )
+      }
+    } catch (err) {
+      console.warn("Timetable upload extraction error:", err)
+      setIsTimetableError(true)
       setTimetableStatus(
-        `✓ ${extracted.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
+        "An error occurred while analyzing the timetable. Please load the sample template or enter classes manually below.",
       )
-    } else {
-      setTimetableStatus(
-        "Could not detect timetable data from this file. Please enter your classes manually below.",
-      )
+    } finally {
+      setIsTimetableExtracting(false)
     }
   }
 
@@ -1249,17 +1361,30 @@ function Onboarding({
     if (file.type.startsWith("image/")) {
       setExamPreview(URL.createObjectURL(file))
     }
-    const extracted = await parseUploadedExamFile(file)
-    if (extracted.length > 0) {
-      setEvents((current) => [
-        ...current.filter((e) => e.type !== "Exam"),
-        ...extracted,
-      ])
-      setExamStatus(`✓ ${extracted.length} exams extracted from document.`)
-    } else {
-      setExamStatus(
-        "Document extraction from images/PDFs requires backend OCR. Please enter your exams manually below.",
-      )
+    setIsExamExtracting(true)
+    setIsExamError(false)
+    setExamStatus("")
+    try {
+      const extracted = await parseUploadedExamFile(file)
+      if (extracted.length > 0) {
+        setEvents((current) => [
+          ...current.filter((e) => e.type !== "Exam"),
+          ...extracted,
+        ])
+        setIsExamError(false)
+        setExamStatus(`✓ ${extracted.length} exams extracted from document.`)
+      } else {
+        setIsExamError(true)
+        setExamStatus(
+          "Could not detect exam deadlines from this document. Please enter your exams manually below.",
+        )
+      }
+    } catch (err) {
+      console.warn("Exam upload extraction error:", err)
+      setIsExamError(true)
+      setExamStatus("Failed to extract exams. Please enter your exams manually below.")
+    } finally {
+      setIsExamExtracting(false)
     }
   }
 
@@ -1397,6 +1522,8 @@ function Onboarding({
                 uploaded={timetableFile}
                 previewUrl={timetablePreview}
                 statusMessage={timetableStatus}
+                isExtracting={isTimetableExtracting}
+                isError={isTimetableError}
                 onFileSelect={handleTimetableUpload}
               />
               <div
@@ -1598,6 +1725,8 @@ function Onboarding({
                 uploaded={examFile}
                 previewUrl={examPreview}
                 statusMessage={examStatus}
+                isExtracting={isExamExtracting}
+                isError={isExamError}
                 onFileSelect={handleExamUpload}
               />
               <EditableItems
@@ -1961,6 +2090,95 @@ function TaskDialog({
                   onChange={(_, d) => field("dueTime", d.value)}
                 />
               </Label>
+              <div className="quick-preset-chips">
+                <span className="quick-chip-label">Quick set:</span>
+                <button
+                  type="button"
+                  className="quick-chip"
+                  onClick={() => {
+                    const d = new Date()
+                    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                    setDraft({ ...draft, dueDate: ymd, dueTime: "23:59" })
+                  }}
+                >
+                  Today (11:59 PM)
+                </button>
+                <button
+                  type="button"
+                  className="quick-chip"
+                  onClick={() => {
+                    const d = new Date()
+                    d.setDate(d.getDate() + 1)
+                    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                    setDraft({ ...draft, dueDate: ymd, dueTime: "17:00" })
+                  }}
+                >
+                  Tomorrow (5:00 PM)
+                </button>
+                <button
+                  type="button"
+                  className="quick-chip"
+                  onClick={() => {
+                    const d = new Date()
+                    const todayDay = d.getDay()
+                    const daysUntilFri = (5 - todayDay + 7) % 7 || 7
+                    d.setDate(d.getDate() + daysUntilFri)
+                    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                    setDraft({ ...draft, dueDate: ymd, dueTime: "17:00" })
+                  }}
+                >
+                  Friday (5:00 PM)
+                </button>
+                <button
+                  type="button"
+                  className="quick-chip"
+                  onClick={() => {
+                    const d = new Date()
+                    const todayDay = d.getDay()
+                    const daysUntilMon = (8 - todayDay) % 7 || 7
+                    d.setDate(d.getDate() + daysUntilMon)
+                    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                    setDraft({ ...draft, dueDate: ymd, dueTime: "09:00" })
+                  }}
+                >
+                  Next Mon (9:00 AM)
+                </button>
+                {draft.dueDate && (
+                  <button
+                    type="button"
+                    className="quick-chip"
+                    style={{ color: "var(--colorPaletteRedForeground1)" }}
+                    onClick={() => setDraft({ ...draft, dueDate: "", dueTime: "" })}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {draft.dueDate && (
+                <div
+                  className={`deadline-preview-banner ${
+                    getTaskDeadlineInfo(draft.dueDate, draft.dueTime, "open").urgencyColor
+                  }`}
+                >
+                  {getTaskDeadlineInfo(draft.dueDate, draft.dueTime, "open").isOverdue ? (
+                    <Alert20Regular />
+                  ) : (
+                    <Clock20Regular />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text weight="semibold" size={200}>
+                      {getTaskDeadlineInfo(draft.dueDate, draft.dueTime, "open").fullDisplay}
+                    </Text>
+                    <Text size={100} style={{ display: "block", opacity: 0.85 }}>
+                      {getTaskDeadlineInfo(draft.dueDate, draft.dueTime, "open").isOverdue
+                        ? "⚠️ Notice: This deadline is in the past."
+                        : `✦ SAGE tracking: Due ${
+                            getTaskDeadlineInfo(draft.dueDate, draft.dueTime, "open").relativeCountdown
+                          } from now`}
+                    </Text>
+                  </div>
+                </div>
+              )}
               <Label>
                 Estimated duration
                 <Input
@@ -2144,6 +2362,8 @@ function TaskRow({
   edit: () => void
   focus: () => void
 }) {
+  const deadline = getTaskDeadlineInfo(task.dueDate, task.dueTime, task.status)
+
   return (
     <div className={`task-row ${task.status === "completed" ? "is-done" : ""}`}>
       <Checkbox
@@ -2159,13 +2379,30 @@ function TaskRow({
         </Text>
         <div className="task-meta">
           <span>{task.course || "Personal"}</span>
-          {task.dueDate && (
-            <span>
+          <span>{task.duration} min</span>
+          {task.dueDate ? (
+            <span
+              className={`deadline-pill ${deadline.urgencyColor}`}
+              title={deadline.fullDisplay}
+            >
+              {deadline.isOverdue ? (
+                <Alert20Regular />
+              ) : (
+                <Clock20Regular />
+              )}
+              <span>{deadline.badgeText}</span>
+              {deadline.formattedTime && !deadline.isOverdue && (
+                <span className="deadline-countdown-chip">
+                  · {deadline.formattedTime}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="deadline-pill subtle">
               <Clock20Regular />
-              {task.dueDate} {task.dueTime}
+              <span>No deadline</span>
             </span>
           )}
-          <span>{task.duration} min</span>
         </div>
       </div>
       <Badge
@@ -2564,6 +2801,8 @@ function Workspace({
   const [focusTask, setFocusTask] = useState<Task | null>(null)
   const [search, setSearch] = useState("")
   const [notifPanelOpen, setNotifPanelOpen] = useState(false)
+  const [activeToastAlert, setActiveToastAlert] = useState<Reminder | null>(null)
+
   const newTask = () => {
     setEditingTask(null)
     setTaskDialog(true)
@@ -2583,6 +2822,36 @@ function Workspace({
         ),
       )
       taskService.updateTask(id, data).catch(() => {})
+
+      if (data.dueDate) {
+        const taskReminderInput = {
+          id,
+          title: data.title,
+          dueDate: data.dueDate,
+          dueTime: data.dueTime,
+        }
+        setReminders((cur) => {
+          const next = upsertTaskDeadlineReminder(
+            cur,
+            taskReminderInput,
+            notifications.timing || "exact",
+          )
+          saveReminders(next)
+          return next
+        })
+        const deadlineReminder = buildTaskDeadlineReminder(
+          taskReminderInput,
+          notifications.timing || "exact",
+        )
+        syncReminderToBackend(deadlineReminder).catch(() => {})
+      } else {
+        setReminders((cur) => {
+          const next = removeTaskDeadlineReminder(cur, id)
+          saveReminders(next)
+          return next
+        })
+        deleteBackendReminder(id).catch(() => {})
+      }
     } else {
       const tempId = Date.now()
       const optimisticTask: Task = {
@@ -2591,11 +2860,58 @@ function Workspace({
         createdAt: new Date().toISOString(),
       }
       setTasks((list) => [...list, optimisticTask])
+
+      if (data.dueDate) {
+        const taskReminderInput = {
+          id: tempId,
+          title: data.title,
+          dueDate: data.dueDate,
+          dueTime: data.dueTime,
+        }
+        setReminders((cur) => {
+          const next = upsertTaskDeadlineReminder(
+            cur,
+            taskReminderInput,
+            notifications.timing || "exact",
+          )
+          saveReminders(next)
+          return next
+        })
+        const deadlineReminder = buildTaskDeadlineReminder(
+          taskReminderInput,
+          notifications.timing || "exact",
+        )
+        syncReminderToBackend(deadlineReminder).catch(() => {})
+      }
+
       taskService
         .createTask(data)
         .then((created) => {
           if (created && created.id !== tempId) {
             setTasks((list) => list.map((x) => (x.id === tempId ? created : x)))
+            if (data.dueDate) {
+              const updatedReminderInput = {
+                id: created.id,
+                title: created.title,
+                dueDate: created.dueDate || data.dueDate,
+                dueTime: created.dueTime || data.dueTime,
+              }
+              setReminders((cur) => {
+                const cleaned = removeTaskDeadlineReminder(cur, tempId)
+                const next = upsertTaskDeadlineReminder(
+                  cleaned,
+                  updatedReminderInput,
+                  notifications.timing || "exact",
+                )
+                saveReminders(next)
+                return next
+              })
+              const updatedDeadlineReminder = buildTaskDeadlineReminder(
+                updatedReminderInput,
+                notifications.timing || "exact",
+              )
+              syncReminderToBackend(updatedDeadlineReminder).catch(() => {})
+            }
           }
         })
         .catch(() => {})
@@ -2613,6 +2929,54 @@ function Workspace({
   const updateTask = (id: number, patch: Partial<Task>) => {
     setTasks((list) => list.map((x) => (x.id === id ? { ...x, ...patch } : x)))
     taskService.updateTask(id, patch).catch(() => {})
+
+    if (patch.status === "completed") {
+      setReminders((cur) => {
+        const next = cur.map((r) =>
+          r.targetType === "task" && String(r.targetId) === String(id)
+            ? {
+                ...r,
+                status: "completed" as const,
+                completedAt: new Date().toISOString(),
+                read: true,
+              }
+            : r,
+        )
+        saveReminders(next)
+        return next
+      })
+      updateBackendReminderStatus(id, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      }).catch(() => {})
+    } else if (patch.dueDate || patch.title || patch.dueTime) {
+      const existing = tasks.find((t) => t.id === id)
+      if (existing) {
+        const updatedTask = { ...existing, ...patch }
+        if (updatedTask.dueDate) {
+          const taskReminderInput = {
+            id,
+            title: updatedTask.title,
+            dueDate: updatedTask.dueDate,
+            dueTime: updatedTask.dueTime,
+          }
+          setReminders((cur) => {
+            const next = upsertTaskDeadlineReminder(
+              cur,
+              taskReminderInput,
+              notifications.timing || "exact",
+            )
+            saveReminders(next)
+            return next
+          })
+          const rObj = buildTaskDeadlineReminder(
+            taskReminderInput,
+            notifications.timing || "exact",
+          )
+          syncReminderToBackend(rObj).catch(() => {})
+        }
+      }
+    }
   }
   const results =
     search.length > 1
@@ -2620,7 +2984,7 @@ function Workspace({
           x.title.toLowerCase().includes(search.toLowerCase()),
         )
       : []
-  // Real-time reminder checker and browser notification dispatcher
+  // Real-time reminder checker and browser/in-app notification dispatcher
   useEffect(() => {
     const checkReminders = () => {
       const now = new Date()
@@ -2637,15 +3001,23 @@ function Workspace({
             updated = true
             const canNotify =
               notifications.inApp &&
-              notifications.browserNotifications &&
               !quiet &&
               (r.targetType === "contest" ? notifications.contests : true) &&
               (r.targetType === "task" ? notifications.tasks : true)
             if (canNotify) {
-              dispatchBrowserNotification("SAGE Reminder Due", r.title, () => {
-                setView("Reminders")
-                setNotifPanelOpen(true)
-              })
+              setActiveToastAlert(r)
+              if (notifications.browserNotifications) {
+                dispatchBrowserNotification("SAGE Reminder Due: " + r.title, r.title, () => {
+                  setView(
+                    r.targetType === "contest"
+                      ? "Contests"
+                      : r.targetType === "task"
+                        ? "Tasks"
+                        : "Reminders",
+                  )
+                  setNotifPanelOpen(true)
+                })
+              }
             }
             return {
               ...r,
@@ -2664,15 +3036,23 @@ function Workspace({
             updated = true
             const canNotify =
               notifications.inApp &&
-              notifications.browserNotifications &&
               !quiet &&
               (r.targetType === "contest" ? notifications.contests : true) &&
               (r.targetType === "task" ? notifications.tasks : true)
             if (canNotify) {
-              dispatchBrowserNotification("SAGE Reminder Due", r.title, () => {
-                setView("Reminders")
-                setNotifPanelOpen(true)
-              })
+              setActiveToastAlert(r)
+              if (notifications.browserNotifications) {
+                dispatchBrowserNotification("SAGE Reminder Due: " + r.title, r.title, () => {
+                  setView(
+                    r.targetType === "contest"
+                      ? "Contests"
+                      : r.targetType === "task"
+                        ? "Tasks"
+                        : "Reminders",
+                  )
+                  setNotifPanelOpen(true)
+                })
+              }
             }
             return {
               ...r,
@@ -2814,6 +3194,12 @@ function Workspace({
         remove={(id) => {
           setTasks((list) => list.filter((x) => x.id !== id))
           taskService.deleteTask(id).catch(() => {})
+          setReminders((cur) => {
+            const next = removeTaskDeadlineReminder(cur, id)
+            saveReminders(next)
+            return next
+          })
+          deleteBackendReminder(id).catch(() => {})
         }}
       />
     ) : view === "Goals" ? (
@@ -2857,6 +3243,10 @@ function Workspace({
       <AskSageScreen
         tasks={tasks}
         events={events}
+        timetable={timetable}
+        setTasks={setTasks}
+        setEvents={setEvents}
+        setTimetable={setTimetable}
         focus={setFocusTask}
         addTask={newTask}
         updateTask={updateTask}
@@ -2948,6 +3338,21 @@ function Workspace({
         <div className="scrim" onClick={() => setMobileNav(false)} />
       )}
       <div className="app-main">
+        <InAppNotificationBanner
+          alert={activeToastAlert}
+          onDismiss={() => setActiveToastAlert(null)}
+          onSnooze={handleSnoozeFromNotification}
+          onView={(alert) => {
+            setActiveToastAlert(null)
+            setView(
+              alert.targetType === "contest"
+                ? "Contests"
+                : alert.targetType === "task"
+                  ? "Tasks"
+                  : "Reminders",
+            )
+          }}
+        />
         <header className="topbar">
           <Button
             className="menu-button"
@@ -3363,7 +3768,7 @@ function HomeScreen({
     ...todayTasks.map((t) => ({
       id: `task-${t.id}`,
       title: t.title,
-      time: t.dueTime ? `Due ${t.dueTime}` : "Due today",
+      time: t.dueTime ? `Due ${formatTime12(t.dueTime)}` : "Due today (by 11:59 PM)",
       badge: t.course ? t.course : "Assignment",
       badgeColor: "warning" as const,
       type: "Task",
@@ -4042,30 +4447,74 @@ function TasksScreen({
   remove: (id: number) => void
 }) {
   const [tab, setTab] = useState("All")
-  const filtered = tasks.filter((x) =>
-    tab === "All"
-      ? true
-      : tab === "Completed"
-        ? x.status === "completed"
-        : tab === "Snoozed"
-          ? x.status === "snoozed"
-          : tab === "Today"
-            ? x.status === "open" &&
-              x.dueDate === new Date().toISOString().slice(0, 10)
-            : x.status === "open",
+  const todayStr = getLocalDateString()
+
+  const openTasks = tasks.filter((x) => x.status === "open")
+  const overdueTasks = openTasks.filter(
+    (x) => x.dueDate && x.dueDate < todayStr,
   )
+  const todayTasks = openTasks.filter((x) => x.dueDate === todayStr)
+  const upcomingTasks = openTasks.filter(
+    (x) => x.dueDate && x.dueDate > todayStr,
+  )
+  const completedTasks = tasks.filter((x) => x.status === "completed")
+  const snoozedTasks = tasks.filter((x) => x.status === "snoozed")
+
+  const filtered = tasks.filter((x) => {
+    if (tab === "All") return true
+    if (tab === "Today") return x.status === "open" && x.dueDate === todayStr
+    if (tab === "Upcoming")
+      return x.status === "open" && x.dueDate && x.dueDate > todayStr
+    if (tab === "Overdue")
+      return x.status === "open" && x.dueDate && x.dueDate < todayStr
+    if (tab === "Completed") return x.status === "completed"
+    if (tab === "Snoozed") return x.status === "snoozed"
+    return x.status === "open"
+  })
+
   return (
     <>
       <PageHeading
         eyebrow="YOUR WORK"
         title="Tasks"
-        subtitle="Capture your work, decide what matters, and keep every next action clear."
+        subtitle="Capture your work with clear deadlines, countdowns, and priorities."
         action={
           <Button appearance="primary" icon={<Add20Regular />} onClick={create}>
             New Task
           </Button>
         }
       />
+      {overdueTasks.length > 0 && tab !== "Overdue" && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "10px 14px",
+            background: "var(--colorPaletteRedBackground1)",
+            border: "1px solid rgba(209, 52, 56, 0.3)",
+            borderRadius: "var(--borderRadiusMedium)",
+            marginBottom: "var(--spacingVerticalM)",
+            color: "var(--colorPaletteRedForeground1)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <Alert20Regular />
+            <Text weight="semibold" size={200}>
+              You have {overdueTasks.length} overdue task
+              {overdueTasks.length === 1 ? "" : "s"} needing attention.
+            </Text>
+          </div>
+          <Button
+            appearance="subtle"
+            size="small"
+            style={{ color: "var(--colorPaletteRedForeground1)" }}
+            onClick={() => setTab("Overdue")}
+          >
+            View Overdue Tasks
+          </Button>
+        </div>
+      )}
       <Card className="content-card large-card">
         <TabList
           selectedValue={tab}
@@ -4073,11 +4522,12 @@ function TasksScreen({
             setTab(String(d.value))
           }
         >
-          {["All", "Today", "Upcoming", "Completed", "Snoozed"].map((x) => (
-            <Tab value={x} key={x}>
-              {x}
-            </Tab>
-          ))}
+          <Tab value="All">All ({tasks.length})</Tab>
+          <Tab value="Today">Today ({todayTasks.length})</Tab>
+          <Tab value="Upcoming">Upcoming ({upcomingTasks.length})</Tab>
+          <Tab value="Overdue">Overdue ({overdueTasks.length})</Tab>
+          <Tab value="Completed">Completed ({completedTasks.length})</Tab>
+          <Tab value="Snoozed">Snoozed ({snoozedTasks.length})</Tab>
         </TabList>
         {filtered.length ? (
           filtered.map((task) => (
@@ -4255,6 +4705,8 @@ function UploadScheduleDialog({
     useState<TimetableEntry[]>([])
   const [extractedEvents, setExtractedEvents] = useState<EventItem[]>([])
   const [statusMsg, setStatusMsg] = useState("")
+  const [isExtracting, setIsExtracting] = useState(false)
+  const [isError, setIsError] = useState(false)
 
   const handleFile = async (f: File) => {
     setFile(f)
@@ -4263,48 +4715,92 @@ function UploadScheduleDialog({
     } else {
       setPreviewUrl("")
     }
-    if (scheduleType === "timetable") {
-      const entries = await parseUploadedTimetableFile(f)
-      setExtractedTimetable(entries)
-      setStatusMsg(
-        `✓ ${entries.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
-      )
-    } else {
-      const items = await parseUploadedExamFile(f)
-      setExtractedEvents(items)
-      if (items.length > 0) {
-        setStatusMsg(
-          `✓ ${items.length} upcoming exams extracted from document.`,
-        )
+    setIsExtracting(true)
+    setIsError(false)
+    setStatusMsg("")
+
+    try {
+      if (scheduleType === "timetable") {
+        const entries = await parseUploadedTimetableFile(f)
+        setExtractedTimetable(entries)
+        if (entries.length > 0) {
+          setIsError(false)
+          setStatusMsg(
+            `✓ ${entries.length} class blocks merged · College periods (8:10 AM – 5:20 PM) · Resolved via Course Catalog`,
+          )
+        } else {
+          setIsError(true)
+          setStatusMsg(
+            "Could not detect timetable data from this image or document. You can load our standard university curriculum template below or review image clarity.",
+          )
+        }
       } else {
-        setStatusMsg(
-          "Document extraction from images/PDFs requires backend OCR. Please use 'Add Event' in Calendar to enter exams manually.",
-        )
+        const items = await parseUploadedExamFile(f)
+        setExtractedEvents(items)
+        if (items.length > 0) {
+          setIsError(false)
+          setStatusMsg(
+            `✓ ${items.length} upcoming exams extracted from document.`,
+          )
+        } else {
+          setIsError(true)
+          setStatusMsg(
+            "Could not detect exam deadlines from this document. Please check image clarity or use 'Add Event' in Calendar.",
+          )
+        }
       }
+    } catch (err) {
+      console.warn("Failed to process schedule file:", err)
+      setIsError(true)
+      setStatusMsg(
+        "An error occurred while analyzing the schedule with SAGE AI. Please try again or load the standard template.",
+      )
+    } finally {
+      setIsExtracting(false)
     }
   }
 
   const handleTypeChange = async (type: "timetable" | "exam") => {
     setScheduleType(type)
     if (file) {
-      if (type === "timetable") {
-        const entries = await parseUploadedTimetableFile(file)
-        setExtractedTimetable(entries)
-        setStatusMsg(
-          `✓ ${entries.length} class blocks merged · College periods (8:10 AM – 5:20 PM)`,
-        )
-      } else {
-        const items = await parseUploadedExamFile(file)
-        setExtractedEvents(items)
-        if (items.length > 0) {
-          setStatusMsg(
-            `✓ ${items.length} upcoming exams extracted from document.`,
-          )
+      setIsExtracting(true)
+      setIsError(false)
+      setStatusMsg("")
+      try {
+        if (type === "timetable") {
+          const entries = await parseUploadedTimetableFile(file)
+          setExtractedTimetable(entries)
+          if (entries.length > 0) {
+            setIsError(false)
+            setStatusMsg(
+              `✓ ${entries.length} class blocks merged · College periods (8:10 AM – 5:20 PM)`,
+            )
+          } else {
+            setIsError(true)
+            setStatusMsg(
+              "Could not detect timetable data from this file. You can load our standard curriculum template below.",
+            )
+          }
         } else {
-          setStatusMsg(
-            "Document extraction from images/PDFs requires backend OCR. Please use 'Add Event' in Calendar to enter exams manually.",
-          )
+          const items = await parseUploadedExamFile(file)
+          setExtractedEvents(items)
+          if (items.length > 0) {
+            setIsError(false)
+            setStatusMsg(
+              `✓ ${items.length} upcoming exams extracted from document.`,
+            )
+          } else {
+            setIsError(true)
+            setStatusMsg(
+              "Could not detect exam deadlines from this document. Please check image clarity or use 'Add Event' in Calendar.",
+            )
+          }
         }
+      } catch (err) {
+        setIsError(true)
+        setStatusMsg("Failed to analyze schedule file.")
+      } finally {
+        setIsExtracting(false)
       }
     }
   }
@@ -4360,8 +4856,68 @@ function UploadScheduleDialog({
                 uploaded={file?.name || ""}
                 previewUrl={previewUrl}
                 statusMessage={statusMsg}
+                isExtracting={isExtracting}
+                isError={isError}
                 onFileSelect={handleFile}
               />
+
+              {scheduleType === "timetable" && (
+                <div
+                  style={{
+                    padding: "12px 14px",
+                    background: "var(--colorNeutralBackground2)",
+                    borderRadius: "var(--borderRadiusMedium)",
+                    border: "1px solid var(--colorNeutralStroke2)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "2px",
+                      flex: 1,
+                      minWidth: "220px",
+                    }}
+                  >
+                    <Text weight="semibold" size={200}>
+                      Standard College Curriculum Template
+                    </Text>
+                    <Text
+                      size={200}
+                      style={{ color: "var(--colorNeutralForeground3)" }}
+                    >
+                      {extractedTimetable.length > 0
+                        ? "Want to reset? Replace with the standard engineering curriculum timetable."
+                        : "No classes detected yet? Load the standard college curriculum timetable with 1-click."}
+                    </Text>
+                  </div>
+                  <Button
+                    appearance={
+                      extractedTimetable.length === 0 ? "primary" : "secondary"
+                    }
+                    size="small"
+                    icon={<Book20Regular />}
+                    disabled={isExtracting}
+                    onClick={() => {
+                      const template = getSampleTimetableTemplate()
+                      setExtractedTimetable(template)
+                      setIsError(false)
+                      setStatusMsg(
+                        `✓ Loaded standard curriculum template (${template.length} class blocks). Review below before saving.`,
+                      )
+                    }}
+                  >
+                    {extractedTimetable.length > 0
+                      ? "Replace with Template"
+                      : "Load Standard Curriculum Template"}
+                  </Button>
+                </div>
+              )}
 
               {scheduleType === "timetable" &&
                 extractedTimetable.length > 0 && (
@@ -4444,19 +5000,22 @@ function UploadScheduleDialog({
             </div>
           </DialogContent>
           <DialogActions>
-            <Button appearance="secondary" onClick={close}>
+            <Button appearance="secondary" onClick={close} disabled={isExtracting}>
               Cancel
             </Button>
             <Button
               appearance="primary"
               disabled={
-                scheduleType === "timetable"
+                isExtracting ||
+                (scheduleType === "timetable"
                   ? !extractedTimetable.length
-                  : !extractedEvents.length
+                  : !extractedEvents.length)
               }
               onClick={save}
             >
-              {scheduleType === "timetable"
+              {isExtracting
+                ? "Extracting Schedule..."
+                : scheduleType === "timetable"
                 ? `Save Timetable (${extractedTimetable.length} Blocks)`
                 : `Save ${extractedEvents.length} Exams`}
             </Button>
@@ -5256,13 +5815,25 @@ function ContestsScreen({
   }
   const handleSetReminder = (contest: Contest, timingStr: string) => {
     const timing = (timingStr || "1h") as ReminderTiming
-    setReminders((current) => upsertContestReminder(current, contest, timing))
+    setReminders((current) => {
+      const updated = upsertContestReminder(current, contest, timing)
+      const target = updated.find(
+        (r) =>
+          (r.targetType === "contest" && String(r.targetId) === String(contest.id)) ||
+          r.contestId === contest.id,
+      )
+      if (target) {
+        syncReminderToBackend(target).catch(() => {})
+      }
+      return updated
+    })
     setSuccess(true)
     window.setTimeout(() => setSuccess(false), 2400)
   }
 
   const handleRemoveReminder = (contestId: string) => {
     setReminders((current) => removeContestReminder(current, contestId))
+    deleteBackendReminder(contestId).catch(() => {})
   }
 
   if (!platforms.length)
@@ -5581,7 +6152,7 @@ function RemindersScreen({
     date: todayStr,
     time: "09:00",
     timing: "exact",
-    method: "In-app",
+    method: "Email + In-app",
   })
 
   const activeReminders = reminders.filter(
@@ -5614,7 +6185,7 @@ function RemindersScreen({
       date: todayStr,
       time: `${defaultHour}:00`,
       timing: "exact",
-      method: "In-app",
+      method: "Email + In-app",
     })
     setOpen(true)
   }
@@ -5627,7 +6198,7 @@ function RemindersScreen({
       date: r.date || todayStr,
       time: validTime,
       timing: r.notificationTiming || "exact",
-      method: r.method || "In-app",
+      method: r.method || "Email + In-app",
     })
     setOpen(true)
   }
@@ -5636,60 +6207,68 @@ function RemindersScreen({
     if (!draft.title.trim()) return
     const dueAt = buildDueAtTimestamp(draft.date, draft.time)
     if (editingId) {
+      let updatedObj: Reminder | null = null
       setReminders((list) => {
-        const next = list.map((r) =>
-          r.id === editingId
-            ? normalizeReminder({
-                ...r,
-                title: draft.title.trim(),
-                date: draft.date,
-                time: draft.time,
-                dueAt,
-                notificationTiming: draft.timing,
-                method: draft.method,
-                status: "open",
-                snoozedUntil: undefined,
-                notifiedAt: undefined,
-                read: false,
-                dismissed: false,
-              })
-            : r,
-        )
+        const next = list.map((r) => {
+          if (r.id === editingId) {
+            updatedObj = normalizeReminder({
+              ...r,
+              title: draft.title.trim(),
+              date: draft.date,
+              time: draft.time,
+              dueAt,
+              notificationTiming: draft.timing,
+              method: draft.method,
+              status: "open",
+              snoozedUntil: undefined,
+              notifiedAt: undefined,
+              read: false,
+              dismissed: false,
+            })
+            return updatedObj
+          }
+          return r
+        })
         saveReminders(next)
         return next
       })
+      if (updatedObj) {
+        syncReminderToBackend(updatedObj).catch(() => {})
+      }
     } else {
+      const newReminder = normalizeReminder({
+        id: Date.now(),
+        title: draft.title.trim(),
+        date: draft.date,
+        time: draft.time,
+        dueAt,
+        createdAt: new Date().toISOString(),
+        notificationTiming: draft.timing,
+        method: draft.method,
+        status: "open",
+        read: false,
+        dismissed: false,
+      })
       setReminders((list) => {
-        const newReminder = normalizeReminder({
-          id: Date.now(),
-          title: draft.title.trim(),
-          date: draft.date,
-          time: draft.time,
-          dueAt,
-          createdAt: new Date().toISOString(),
-          notificationTiming: draft.timing,
-          method: draft.method,
-          status: "open",
-          read: false,
-          dismissed: false,
-        })
         const next = [...list, newReminder]
         saveReminders(next)
         return next
       })
+      syncReminderToBackend(newReminder).catch(() => {})
     }
     setOpen(false)
     setEditingId(null)
   }
 
   const handleComplete = (id: number) => {
+    const completedAtIso = new Date().toISOString()
     setReminders((list) => {
       const next = list.map((r) =>
         r.id === id
           ? {
               ...r,
               status: "completed" as const,
-              completedAt: new Date().toISOString(),
+              completedAt: completedAtIso,
               read: true,
             }
           : r,
@@ -5697,6 +6276,10 @@ function RemindersScreen({
       saveReminders(next)
       return next
     })
+    updateBackendReminderStatus(id, {
+      status: "completed",
+      completedAt: completedAtIso,
+    }).catch(() => {})
   }
 
   const handleReopen = (id: number) => {
@@ -5716,6 +6299,7 @@ function RemindersScreen({
       saveReminders(next)
       return next
     })
+    updateBackendReminderStatus(id, { status: "open" }).catch(() => {})
   }
 
   const handleSnooze = (id: number) => {
@@ -5750,6 +6334,10 @@ function RemindersScreen({
       saveReminders(next)
       return next
     })
+    updateBackendReminderStatus(id, {
+      status: "snoozed",
+      snoozedUntil: snoozedUntilIso,
+    }).catch(() => {})
   }
 
   const handleDelete = (id: number) => {
@@ -5766,6 +6354,7 @@ function RemindersScreen({
       saveReminders(next)
       return next
     })
+    deleteBackendReminder(id).catch(() => {})
   }
 
   return (
@@ -5807,11 +6396,16 @@ function RemindersScreen({
             }}
           >
             {displayedReminders.map((r) => {
-              const isOverdue =
-                r.status !== "completed" && r.date && r.date < todayStr
-              const isToday = r.date === todayStr && r.status !== "completed"
-              const isSnoozed = r.status === "snoozed"
+              const triggerMs = getReminderTriggerTime(r)
+              const visual = getReminderVisualInfo(
+                triggerMs,
+                r.date,
+                r.time,
+                r.status,
+                r.method,
+              )
               const isCompleted = r.status === "completed"
+              const isSnoozed = r.status === "snoozed"
 
               return (
                 <div className="reminder-row" key={r.id}>
@@ -5822,18 +6416,24 @@ function RemindersScreen({
                         ? "var(--colorPaletteGreenBackground2)"
                         : isSnoozed
                           ? "var(--colorPaletteBerryBackground2)"
-                          : undefined,
+                          : visual.isTriggered
+                            ? "var(--colorPaletteRedBackground1)"
+                            : undefined,
                       color: isCompleted
                         ? "var(--colorPaletteGreenForeground1)"
                         : isSnoozed
                           ? "var(--colorPaletteBerryForeground1)"
-                          : undefined,
+                          : visual.isTriggered
+                            ? "var(--colorPaletteRedForeground1)"
+                            : undefined,
                     }}
                   >
                     {isCompleted ? (
                       <CheckmarkCircle20Filled />
-                    ) : (
+                    ) : visual.isTriggered ? (
                       <Alert20Regular />
+                    ) : (
+                      <Clock20Regular />
                     )}
                   </div>
                   <div className="task-main">
@@ -5853,57 +6453,42 @@ function RemindersScreen({
                           {r.platform || "Contest"}
                         </Badge>
                       )}
-                      {isCompleted && (
-                        <Badge appearance="tint" color="success">
-                          Completed
-                        </Badge>
-                      )}
+                      <div className={`reminder-timing-pill ${visual.urgencyColor}`}>
+                        <Clock20Regular />
+                        <span>{visual.statusBadge}</span>
+                      </div>
+                      {r.notificationTiming &&
+                        r.notificationTiming !== "exact" && (
+                          <Badge appearance="tint" color="informative">
+                            🔔 {TIMING_LABELS[r.notificationTiming] || ""}
+                          </Badge>
+                        )}
                       {r.dismissed && (
                         <Badge appearance="tint" color="subtle">
                           Dismissed
                         </Badge>
                       )}
-                      {isSnoozed && (
-                        <Badge appearance="tint" color="warning">
-                          Snoozed to {r.time}
-                        </Badge>
-                      )}
-                      {isOverdue && (
-                        <Badge appearance="tint" color="danger">
-                          Overdue
-                        </Badge>
-                      )}
-                      {isToday && !isSnoozed && (
-                        <Badge appearance="tint" color="brand">
-                          Today
-                        </Badge>
-                      )}
-                      {r.notificationTiming &&
-                        r.notificationTiming !== "exact" && (
-                          <Badge appearance="tint" color="informative">
-                            {TIMING_LABELS[r.notificationTiming] || ""}
-                          </Badge>
-                        )}
                     </div>
                     <Text
                       size={200}
-                      style={{ color: "var(--colorNeutralForeground3)" }}
+                      style={{ color: "var(--colorNeutralForeground3)", marginTop: "2px" }}
                     >
                       {r.targetType === "contest" && r.eventStartTime ? (
                         <>
-                          Contest starts:{" "}
+                          <strong>Contest starts:</strong>{" "}
                           {new Date(r.eventStartTime).toLocaleString([], {
+                            weekday: "short",
                             month: "short",
                             day: "numeric",
                             hour: "numeric",
                             minute: "2-digit",
                           })}{" "}
-                          · Reminder: {formatShortDate(r.date)} {r.time} ·{" "}
-                          {r.method}
+                          · <strong>Notification scheduled:</strong> {visual.formattedDate} at {visual.formattedTime} · Delivery: {r.method}
                         </>
                       ) : (
                         <>
-                          {formatShortDate(r.date)} · {r.time} · {r.method}
+                          <strong>Scheduled alert:</strong> {visual.formattedDate} at {visual.formattedTime}{" "}
+                          ({visual.countdownText}) · Delivery: {r.method}
                         </>
                       )}
                     </Text>
@@ -6043,6 +6628,61 @@ function RemindersScreen({
                     onChange={(_, d) => setDraft({ ...draft, time: d.value })}
                   />
                 </Label>
+                <div className="quick-preset-chips">
+                  <span className="quick-chip-label">Quick set:</span>
+                  <button
+                    type="button"
+                    className="quick-chip"
+                    onClick={() => {
+                      const d = new Date()
+                      d.setHours(d.getHours() + 1)
+                      const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                      const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+                      setDraft({ ...draft, date: ymd, time: hm })
+                    }}
+                  >
+                    In 1 hour
+                  </button>
+                  <button
+                    type="button"
+                    className="quick-chip"
+                    onClick={() => {
+                      const d = new Date()
+                      const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                      setDraft({ ...draft, date: ymd, time: "20:00" })
+                    }}
+                  >
+                    Tonight (8:00 PM)
+                  </button>
+                  <button
+                    type="button"
+                    className="quick-chip"
+                    onClick={() => {
+                      const d = new Date()
+                      d.setDate(d.getDate() + 1)
+                      const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+                      setDraft({ ...draft, date: ymd, time: "09:00" })
+                    }}
+                  >
+                    Tomorrow (9:00 AM)
+                  </button>
+                </div>
+                {draft.date && (
+                  <div className="deadline-preview-banner brand">
+                    <Clock20Regular />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Text weight="semibold" size={200}>
+                        Alert scheduled for: {formatFriendlyDate(draft.date)} at {formatTime12(draft.time)}
+                      </Text>
+                      <Text size={100} style={{ display: "block", opacity: 0.85 }}>
+                        {draft.timing === "exact"
+                          ? "Triggers at the exact time"
+                          : `${TIMING_LABELS[draft.timing] || "Before event"}`}{" "}
+                        · Delivery via {draft.method}
+                      </Text>
+                    </div>
+                  </div>
+                )}
                 <Label>
                   Reminder timing
                   <Dropdown
@@ -6343,403 +6983,57 @@ function ProgressScreen({
   )
 }
 
-const SAGE_CHAT_STORAGE_KEY = "sage_chat_session"
-const SAGE_CONVERSATION_ID_KEY = "sage_conversation_id"
-
-const EXAMPLE_QUESTIONS = [
-  "Plan my study session for today",
-  "What should I work on next?",
-  "Explain normalization in DBMS",
-  "Help me prepare for my upcoming exam",
-  "How can I divide this project into tasks?",
-]
-
-function renderFormattedMessage(text: string) {
-  const paragraphs = text.split(/\n\n+/)
-  return paragraphs.map((para, pIdx) => {
-    const lines = para
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
-    const isBulletList =
-      lines.length > 0 &&
-      lines.every((line) => line.startsWith("- ") || line.startsWith("* "))
-    if (isBulletList) {
-      return (
-        <ul key={pIdx} style={{ margin: "0.25rem 0", paddingLeft: "1.25rem" }}>
-          {lines.map((line, lIdx) => (
-            <li key={lIdx} style={{ marginBottom: "0.25rem" }}>
-              <Text>{line.replace(/^[-*]\s+/, "")}</Text>
-            </li>
-          ))}
-        </ul>
-      )
-    }
-    return (
-      <Text
-        as="p"
-        key={pIdx}
-        style={{ margin: "0.25rem 0", lineHeight: "1.5" }}
-      >
-        {para}
-      </Text>
-    )
-  })
-}
-
 function AskSageScreen({
   tasks,
   events,
-  focus: _focus,
+  timetable = [],
+  setTasks,
+  setEvents,
+  setTimetable,
+  focus,
   addTask: _addTask,
   updateTask: _updateTask,
 }: {
   tasks: Task[]
   events: EventItem[]
+  timetable?: TimetableEntry[]
+  setTasks?: React.Dispatch<React.SetStateAction<Task[]>>
+  setEvents?: React.Dispatch<React.SetStateAction<EventItem[]>>
+  setTimetable?: React.Dispatch<React.SetStateAction<TimetableEntry[]>>
   focus: (t: Task) => void
   addTask: () => void
   updateTask: (id: number, p: Partial<Task>) => void
 }) {
-  const [prompt, setPrompt] = useState("")
-  const [loading, setLoading] = useState(false)
-  const [lastFailedPrompt, setLastFailedPrompt] = useState<string | null>(null)
-  const [conversationId, setConversationId] = useState<string | undefined>(
-    () => {
-      if (typeof window === "undefined") return undefined
-      try {
-        return (
-          window.sessionStorage.getItem(SAGE_CONVERSATION_ID_KEY) || undefined
-        )
-      } catch {
-        return undefined
-      }
-    },
-  )
-
-  const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    if (typeof window === "undefined") return []
-    try {
-      const stored = window.sessionStorage.getItem(SAGE_CHAT_STORAGE_KEY)
-      return stored ? JSON.parse(stored) as ChatMessage[] : []
-    } catch {
-      return []
-    }
-  })
-
-  const messagesEndRef = useRef<HTMLDivElement | null>(null)
-  const abortControllerRef = useRef<AbortController | null>(null)
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, loading])
-
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    try {
-      if (messages.length > 0) {
-        window.sessionStorage.setItem(
-          SAGE_CHAT_STORAGE_KEY,
-          JSON.stringify(messages),
-        )
-      } else {
-        window.sessionStorage.removeItem(SAGE_CHAT_STORAGE_KEY)
-      }
-    } catch {}
-  }, [messages])
-
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    try {
-      if (conversationId) {
-        window.sessionStorage.setItem(SAGE_CONVERSATION_ID_KEY, conversationId)
-      } else {
-        window.sessionStorage.removeItem(SAGE_CONVERSATION_ID_KEY)
-      }
-    } catch {}
-  }, [conversationId])
-
-  useEffect(() => {
-    return () => {
-      abortControllerRef.current?.abort()
-    }
-  }, [])
-
-  const handleSend = async (textToSend: string, isRetry = false) => {
-    const cleanText = textToSend.trim()
-    if (!cleanText || loading) return
-
-    abortControllerRef.current?.abort()
-    const controller = new AbortController()
-    abortControllerRef.current = controller
-
-    const nowIso = new Date().toISOString()
-
-    if (!isRetry) {
-      const userMessage: ChatMessage = {
-        id: `user-${Date.now()}`,
-        sender: "user",
-        text: cleanText,
-        timestamp: nowIso,
-      }
-      setMessages((prev) => [...prev, userMessage])
-      setPrompt("")
-    }
-
-    setLoading(true)
-    setLastFailedPrompt(null)
-
-    if (isRetry) {
-      setMessages((prev) => prev.filter((m) => !m.error))
-    }
-
-    const context: SageContext = {
-      taskIds: tasks
-        .filter((t) => t.status === "open")
-        .slice(0, 5)
-        .map((t) => String(t.id)),
-      includeTodaySchedule: events.length > 0,
-      includeUpcomingExams: true,
-    }
-
-    try {
-      const response = await askSage(
-        {
-          message: cleanText,
-          conversationId,
-          context,
-        },
-        controller.signal,
-      )
-
-      if (response.conversationId) {
-        setConversationId(response.conversationId)
-      }
-
-      const assistantMessage: ChatMessage = {
-        id: response.responseId || `sage-${Date.now()}`,
-        sender: "sage",
-        text: response.message,
-        timestamp: response.timestamp || new Date().toISOString(),
-      }
-
-      setMessages((prev) => [...prev, assistantMessage])
-    } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return
-      }
-
-      const errorText =
-        err instanceof Error && err.message
-          ? err.message
-          : "SAGE couldn't respond right now. Please try again."
-
-      setLastFailedPrompt(cleanText)
-      const errorMessage: ChatMessage = {
-        id: `err-${Date.now()}`,
-        sender: "sage",
-        text: errorText,
-        timestamp: new Date().toISOString(),
-        error: true,
-        canRetry: true,
-      }
-      setMessages((prev) => [...prev, errorMessage])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleRetry = () => {
-    if (lastFailedPrompt) {
-      handleSend(lastFailedPrompt, true)
-    }
-  }
-
-  const clearChat = () => {
-    setMessages([])
-    setConversationId(undefined)
-    setLastFailedPrompt(null)
-    if (typeof window !== "undefined") {
-      try {
-        window.sessionStorage.removeItem(SAGE_CHAT_STORAGE_KEY)
-        window.sessionStorage.removeItem(SAGE_CONVERSATION_ID_KEY)
-      } catch {}
-    }
-  }
-
   return (
-    <div className="assistant-page">
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-          gap: "1rem",
+    <div className="assistant-page" style={{ padding: 0 }}>
+      <AskSageChatbot
+        tasks={tasks}
+        events={events}
+        timetable={timetable}
+        onTaskCreated={(newTask) => {
+          if (setTasks) {
+            setTasks((prev) => {
+              if (prev.some((t) => t.id === newTask.id)) return prev
+              return [newTask, ...prev]
+            })
+          }
         }}
-      >
-        <PageHeading
-          eyebrow="ASK SAGE"
-          title="Plan your next move."
-          subtitle="Answers use the tasks, schedule, goals, and deadlines in your workspace."
-        />
-        {messages.length > 0 && (
-          <Button appearance="subtle" size="small" onClick={clearChat}>
-            Clear conversation
-          </Button>
-        )}
-      </div>
-
-      {messages.length === 0 && (
-        <div
-          className="suggestion-row"
-          role="region"
-          aria-label="Suggested questions"
-        >
-          {EXAMPLE_QUESTIONS.map((question) => (
-            <Button
-              appearance="secondary"
-              key={question}
-              disabled={loading}
-              onClick={() => handleSend(question)}
-            >
-              {question}
-            </Button>
-          ))}
-        </div>
-      )}
-
-      <Card className="chat-card">
-        {messages.length === 0 ? (
-          <div className="chat-empty">
-            <div className="chat-empty-icon">
-              <Sparkle20Filled />
-            </div>
-            <div>
-              <Text as="h3" size={500} weight="semibold" block>
-                Ask SAGE anything about your studies, projects, or plans.
-              </Text>
-              <Text
-                style={{
-                  color: "var(--colorNeutralForeground3)",
-                  maxWidth: "34rem",
-                  display: "inline-block",
-                  marginTop: "0.5rem",
-                }}
-              >
-                Ask questions about prioritizing tasks, reviewing concepts, or
-                preparing for exams. SAGE will use your workspace context to
-                give tailored recommendations.
-              </Text>
-            </div>
-          </div>
-        ) : (
-          <div className="chat-messages" role="log" aria-live="polite">
-            {messages.map((msg) => {
-              if (msg.sender === "user") {
-                return (
-                  <div key={msg.id} className="message user-message">
-                    <Text>{msg.text}</Text>
-                  </div>
-                )
-              }
-
-              if (msg.error) {
-                return (
-                  <div key={msg.id} className="assistant-message">
-                    <div
-                      className="sage-mark"
-                      style={{
-                        background: "var(--colorPaletteRedBackground2)",
-                        color: "var(--colorPaletteRedForeground1)",
-                      }}
-                    >
-                      <Alert20Regular />
-                    </div>
-                    <div>
-                      <Text
-                        weight="semibold"
-                        style={{ color: "var(--colorPaletteRedForeground1)" }}
-                      >
-                        {msg.text}
-                      </Text>
-                      {msg.canRetry && lastFailedPrompt && (
-                        <div style={{ marginTop: "0.5rem" }}>
-                          <Button
-                            size="small"
-                            appearance="secondary"
-                            icon={<ArrowReset20Regular />}
-                            disabled={loading}
-                            onClick={handleRetry}
-                          >
-                            Retry
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )
-              }
-
-              return (
-                <div key={msg.id} className="assistant-message">
-                  <div className="sage-mark">
-                    <Sparkle20Filled />
-                  </div>
-                  <div>{renderFormattedMessage(msg.text)}</div>
-                </div>
-              )
-            })}
-
-            {loading && (
-              <div className="assistant-message">
-                <div className="sage-mark">
-                  <Sparkle20Filled />
-                </div>
-                <div>
-                  <Text
-                    italic
-                    style={{ color: "var(--colorNeutralForeground3)" }}
-                  >
-                    SAGE is thinking...
-                  </Text>
-                  <ProgressBar
-                    style={{ maxWidth: "12rem", marginTop: "0.5rem" }}
-                  />
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        )}
-
-        <div className="composer">
-          <Textarea
-            aria-label="Ask SAGE a question"
-            placeholder="Ask about your workload, study concepts, or next steps… (Enter to send, Shift+Enter for newline)"
-            value={prompt}
-            onChange={(_, d) => setPrompt(d.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                if (prompt.trim() && !loading) {
-                  handleSend(prompt)
-                }
-              }
-            }}
-            disabled={loading}
-          />
-          <Button
-            aria-label="Send message"
-            appearance="primary"
-            icon={<ArrowRight20Regular />}
-            disabled={!prompt.trim() || loading}
-            onClick={() => handleSend(prompt)}
-          />
-        </div>
-      </Card>
+        onTimetableImported={(entries) => {
+          if (setTimetable) {
+            setTimetable((prev) => [...prev, ...entries])
+          }
+        }}
+        onEventsCreated={(newEvents) => {
+          if (setEvents) {
+            setEvents((prev) => [...newEvents, ...prev])
+          }
+        }}
+        onFocusTask={focus}
+      />
     </div>
   )
 }
+
 
 function GoogleCalendarSettings({
   events,
@@ -7111,6 +7405,8 @@ function SettingsScreen({
   const [profileMsg, setProfileMsg] = useState("")
   const [prefMsg, setPrefMsg] = useState("")
   const [notifMsg, setNotifMsg] = useState("")
+  const [testEmailLoading, setTestEmailLoading] = useState(false)
+  const [testEmailStatus, setTestEmailStatus] = useState<string | null>(null)
 
   const handleSaveProfile = () => {
     window.localStorage.setItem("sage-user-profile", JSON.stringify(profile))
@@ -7546,8 +7842,7 @@ function SettingsScreen({
                 <div>
                   <Text weight="semibold">Email reminders</Text>
                   <Text size={200}>
-                    Preference stored. Future connected backend will deliver
-                    email reminders without direct frontend keys.
+                    Transactional email engine active (Brevo). Automated notifications are sent to your verified inbox for upcoming deadlines and contests.
                   </Text>
                 </div>
                 <Switch
@@ -7559,6 +7854,69 @@ function SettingsScreen({
                     }))
                   }
                 />
+              </div>
+
+              <div
+                style={{
+                  marginTop: "8px",
+                  marginBottom: "8px",
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  background: "var(--colorNeutralBackground2, #f5f5f5)",
+                  border: "1px solid var(--colorNeutralStroke2, #e0e0e0)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: "10px",
+                }}
+              >
+                <div>
+                  <Text weight="semibold" size={200} block>
+                    Verify Email Delivery (Brevo Engine)
+                  </Text>
+                  <Text size={100} style={{ color: "var(--colorNeutralForeground3)" }}>
+                    Send an immediate test reminder to confirm email delivery to your inbox.
+                  </Text>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <Button
+                    appearance="secondary"
+                    size="small"
+                    disabled={testEmailLoading}
+                    onClick={async () => {
+                      setTestEmailLoading(true)
+                      setTestEmailStatus(null)
+                      try {
+                        const res = await sendTestReminderEmail("Upcoming Deadline: SAGE Milestone Check")
+                        if (res && res.success) {
+                          setTestEmailStatus(`✓ Sent to ${res.recipient}!`)
+                        } else {
+                          setTestEmailStatus(`✕ Delivery failed: ${res?.error || "Check backend"}`)
+                        }
+                      } catch (e: any) {
+                        setTestEmailStatus(`✕ Error: ${e?.message || "Failed to reach backend"}`)
+                      } finally {
+                        setTestEmailLoading(false)
+                      }
+                    }}
+                  >
+                    {testEmailLoading ? "Sending..." : "Send Test Reminder Email"}
+                  </Button>
+                  {testEmailStatus && (
+                    <Text
+                      size={200}
+                      style={{
+                        fontWeight: 600,
+                        color: testEmailStatus.startsWith("✓")
+                          ? "var(--colorPaletteGreenForeground1, #107c41)"
+                          : "var(--colorPaletteRedForeground1, #c42b1c)",
+                      }}
+                    >
+                      {testEmailStatus}
+                    </Text>
+                  )}
+                </div>
               </div>
 
               <div className="setting-row">
@@ -8035,6 +8393,23 @@ function AppContent() {
     )
     setPlatforms(getUserItem<string[]>(PLATFORMS_STORAGE_KEY, user) || [])
     setReminders(loadSavedReminders(user))
+    if (user?.authenticated) {
+      getBackendReminders()
+        .then((serverReminders) => {
+          if (serverReminders && Array.isArray(serverReminders) && serverReminders.length > 0) {
+            setReminders((prev) => {
+              const mapped = serverReminders.map(backendReminderToFrontend)
+              const map = new Map<number, Reminder>()
+              prev.forEach((r) => map.set(r.id, r))
+              mapped.forEach((r) => map.set(r.id, { ...map.get(r.id), ...r }))
+              const merged = Array.from(map.values())
+              saveReminders(merged, user)
+              return merged
+            })
+          }
+        })
+        .catch(() => {})
+    }
     setFocusSessions(
       getUserItem<FocusSessionRecord[]>(FOCUS_SESSIONS_STORAGE_KEY, user) || [],
     )

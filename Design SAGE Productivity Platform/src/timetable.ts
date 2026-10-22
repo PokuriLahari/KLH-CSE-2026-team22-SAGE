@@ -13,6 +13,7 @@
 // ==================================================
 
 import { getUserItem, setUserItem, type UserIdentifier } from "./userStorage.ts"
+import { askSage } from "./services/sageService.ts"
 
 export interface PeriodTime {
   period: number
@@ -336,10 +337,279 @@ export function parseTimetableFromText(text: string): TimetableEntry[] {
   return []
 }
 
-// Parse uploaded file (Image/PDF/Text)
+// Convert file to base64 data URL safely in browser and node environments
+export async function fileToDataUrl(file: File): Promise<string> {
+  if (typeof FileReader !== "undefined") {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+  }
+  const buffer = await file.arrayBuffer()
+  const base64 = Buffer.from(buffer).toString("base64")
+  return `data:${file.type || "application/octet-stream"};base64,${base64}`
+}
+
+function normalize24Hour(raw: string): string {
+  if (!raw) return ""
+  const clean = raw.trim()
+  // Check if 12-hr with AM/PM e.g. "8:10 AM" or "1:10 PM"
+  const ampmMatch = clean.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/i)
+  if (ampmMatch) {
+    let h = parseInt(ampmMatch[1], 10)
+    const m = ampmMatch[2]
+    const meridiem = (ampmMatch[3] || "").toLowerCase()
+    if (meridiem === "pm" && h < 12) h += 12
+    if (meridiem === "am" && h === 12) h = 0
+    return `${String(h).padStart(2, "0")}:${m}`
+  }
+  return clean
+}
+
+export function parseAiTimetableBlock(rawText: string): any[] {
+  if (!rawText) return []
+
+  const findArray = (obj: any): any[] | null => {
+    if (Array.isArray(obj)) return obj
+    if (obj && typeof obj === "object") {
+      if (Array.isArray(obj.timetable)) return obj.timetable
+      if (Array.isArray(obj.classes)) return obj.classes
+      if (Array.isArray(obj.schedule)) return obj.schedule
+      if (Array.isArray(obj.courses)) return obj.courses
+      if (Array.isArray(obj.items)) return obj.items
+    }
+    return null
+  }
+
+  // 1. Look for ```sage-action ... ``` block
+  const actionMatch = rawText.match(/```sage-action\s*([\s\S]*?)\s*```/i)
+  if (actionMatch) {
+    try {
+      const parsed = JSON.parse(actionMatch[1])
+      const arr = findArray(parsed)
+      if (arr && arr.length > 0) return arr
+    } catch {}
+  }
+
+  // 2. Look for ```json ... ``` block
+  const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1])
+      const arr = findArray(parsed)
+      if (arr && arr.length > 0) return arr
+    } catch {}
+  }
+
+  // 3. Look for direct JSON array
+  const arrayMatch = rawText.match(/\[\s*\{[\s\S]*\}\s*\]/)
+  if (arrayMatch) {
+    try {
+      const parsed = JSON.parse(arrayMatch[0])
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    } catch {}
+  }
+
+  // 4. Look for direct JSON object in rawText
+  const directMatch = rawText.match(/\{[\s\S]*"(?:timetable|classes|schedule|courses)"\s*:\s*\[[\s\S]*?\][\s\S]*\}/)
+  if (directMatch) {
+    try {
+      const parsed = JSON.parse(directMatch[0])
+      const arr = findArray(parsed)
+      if (arr && arr.length > 0) return arr
+    } catch {}
+  }
+
+  return []
+}
+
+export function candidatesToTimetableEntries(candidates: any[]): TimetableEntry[] {
+  const dayNameMap: Record<string, number> = {
+    monday: 1, mon: 1,
+    tuesday: 2, tue: 2, tues: 2,
+    wednesday: 3, wed: 3,
+    thursday: 4, thu: 4, thur: 4, thurs: 4,
+    friday: 5, fri: 5,
+    saturday: 6, sat: 6,
+    sunday: 7, sun: 7,
+  }
+  const dayNames = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+  const rawEntries: TimetableEntry[] = []
+
+  for (let idx = 0; idx < candidates.length; idx++) {
+    const c = candidates[idx]
+    if (!c || typeof c !== "object") continue
+
+    const rawCode = String(c.courseCode || c.code || c.subject || c.course || "").trim()
+    if (!rawCode) continue
+
+    const cleanCode = rawCode.toUpperCase()
+    const resolved = resolveCourseName(cleanCode)
+
+    let dayOfWeek = Number(c.dayOfWeek)
+    if (!dayOfWeek || isNaN(dayOfWeek) || dayOfWeek < 1 || dayOfWeek > 7) {
+      const rawDay = String(c.dayName || c.day || "").trim().toLowerCase()
+      dayOfWeek = dayNameMap[rawDay] || 1
+    }
+
+    const dayName = c.dayName || dayNames[dayOfWeek] || "Monday"
+
+    let rawStart = String(c.startTime || c.start || "").trim()
+    let rawEnd = String(c.endTime || c.end || "").trim()
+
+    if (!rawStart && c.time) {
+      const parts = String(c.time).split(/[-–—to]/i).map((s) => s.trim())
+      if (parts[0]) rawStart = parts[0]
+      if (parts[1]) rawEnd = parts[1]
+    }
+
+    let startTime = normalize24Hour(rawStart)
+    let endTime = normalize24Hour(rawEnd)
+
+    let startPeriod = Number(c.startPeriod || c.period || c.fromPeriod || 0)
+    let endPeriod = Number(c.endPeriod || c.toPeriod || startPeriod || 0)
+
+    if (startPeriod >= 1 && startPeriod <= 11 && !startTime && PERIOD_SCHEDULE[startPeriod]) {
+      startTime = PERIOD_SCHEDULE[startPeriod].start
+    }
+    if (endPeriod >= 1 && endPeriod <= 11 && !endTime && PERIOD_SCHEDULE[endPeriod]) {
+      endTime = PERIOD_SCHEDULE[endPeriod].end
+    }
+
+    if (!startTime) startTime = "08:10"
+    if (!endTime) endTime = "09:50"
+
+    if (!startPeriod || startPeriod < 1) {
+      for (const [pStr, slot] of Object.entries(PERIOD_SCHEDULE)) {
+        if (slot.start === startTime || slot.start.replace(/^0/, "") === startTime.replace(/^0/, "")) {
+          startPeriod = Number(pStr)
+          break
+        }
+      }
+    }
+    if (!endPeriod || endPeriod < 1) {
+      for (const [pStr, slot] of Object.entries(PERIOD_SCHEDULE)) {
+        if (slot.end === endTime || slot.end.replace(/^0/, "") === endTime.replace(/^0/, "")) {
+          endPeriod = Number(pStr)
+          break
+        }
+      }
+    }
+
+    if (!startPeriod) startPeriod = 1
+    if (!endPeriod) endPeriod = startPeriod
+    if (endPeriod < startPeriod) endPeriod = startPeriod
+
+    rawEntries.push({
+      id: `tt-ai-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+      dayOfWeek,
+      dayName,
+      courseCode: cleanCode,
+      courseName: c.courseName || resolved.name,
+      isKnownCourse: resolved.isKnown || Boolean(c.courseName),
+      startTime,
+      endTime,
+      startPeriod,
+      endPeriod,
+      location: c.location ? normalizeLocation(String(c.location)) : undefined,
+      faculty: c.faculty ? String(c.faculty).trim() : undefined,
+      recurring: true,
+    })
+  }
+
+  // Sort and merge consecutive periods belonging to the same course
+  rawEntries.sort((a, b) => {
+    if (a.dayOfWeek !== b.dayOfWeek) return a.dayOfWeek - b.dayOfWeek
+    return a.startPeriod - b.startPeriod
+  })
+
+  const mergedEntries: TimetableEntry[] = []
+  for (const item of rawEntries) {
+    const prev = mergedEntries[mergedEntries.length - 1]
+    if (
+      prev &&
+      prev.dayOfWeek === item.dayOfWeek &&
+      prev.courseCode === item.courseCode &&
+      prev.endPeriod + 1 === item.startPeriod
+    ) {
+      prev.endPeriod = item.endPeriod
+      prev.endTime = item.endTime
+      if (!prev.location && item.location) prev.location = item.location
+      if (!prev.faculty && item.faculty) prev.faculty = item.faculty
+    } else {
+      mergedEntries.push({ ...item })
+    }
+  }
+
+  return mergedEntries
+}
+
+// Parse uploaded file (Image/PDF/Text) using multimodal AI when binary
 export async function parseUploadedTimetableFile(
   file: File,
 ): Promise<TimetableEntry[]> {
+  if (!file) return []
+
+  // 1. Text files (.txt, .csv, text/plain)
+  if (
+    file.type === "text/plain" ||
+    file.type === "text/csv" ||
+    file.name.endsWith(".txt") ||
+    file.name.endsWith(".csv")
+  ) {
+    try {
+      const text = await file.text()
+      if (text && text.length > 10) {
+        const parsed = parseTimetableFromText(text)
+        if (parsed.length > 0) return parsed
+      }
+    } catch {}
+  }
+
+  // 2. Images (PNG, JPG, JPEG, WEBP, GIF) and PDF documents
+  const isImageOrPdf =
+    file.type.startsWith("image/") ||
+    file.type === "application/pdf" ||
+    /\.(png|jpe?g|webp|gif|pdf)$/i.test(file.name)
+
+  if (isImageOrPdf) {
+    try {
+      const dataUrl = await fileToDataUrl(file)
+      const prompt =
+        "Please analyze this timetable / class schedule and extract all recurring weekly class sessions. For each class, identify: courseCode (e.g. CS101, 24CS3105), courseName (full title if visible), dayOfWeek (1 for Monday through 7 for Sunday), dayName, startTime (HH:mm format like 08:10 or 09:00), endTime (HH:mm format like 09:50 or 10:40), location (room or lab), and faculty name if visible."
+
+      const response = await askSage({
+        message: prompt,
+        attachment: {
+          mimeType:
+            file.type ||
+            (file.name.toLowerCase().endsWith(".pdf")
+              ? "application/pdf"
+              : "image/png"),
+          data: dataUrl,
+          name: file.name,
+        },
+      })
+
+      const rawReply = response.message || ""
+      const candidates = parseAiTimetableBlock(rawReply)
+      if (candidates.length > 0) {
+        const mapped = candidatesToTimetableEntries(candidates)
+        if (mapped.length > 0) return mapped
+      }
+
+      // Secondary fallback: parse conversational text if Gemini listed the classes
+      const textParsed = parseTimetableFromText(rawReply)
+      if (textParsed.length > 0) return textParsed
+    } catch (err) {
+      console.warn("AI timetable image parsing failed:", err)
+    }
+  }
+
+  // 3. Fallback: try raw text parsing if readable
   try {
     const text = await file.text()
     if (text && text.length > 10) {
@@ -347,6 +617,7 @@ export async function parseUploadedTimetableFile(
       if (parsed.length > 0) return parsed
     }
   } catch {}
+
   // Never default to fabricated timetable; return empty array so UI can display proper error/manual state
   return []
 }

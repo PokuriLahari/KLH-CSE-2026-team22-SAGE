@@ -17,7 +17,11 @@ public interface ReminderRepository extends JpaRepository<Reminder, Long> {
 
     List<Reminder> findByUserIdAndTargetTypeAndContestId(Long userId, String targetType, String contestId);
 
+    List<Reminder> findByUserIdAndTargetTypeAndTargetId(Long userId, String targetType, String targetId);
+
     List<Reminder> findByStatusAndDeliveryStatusAndDueAtLessThanEqual(String status, String deliveryStatus, Instant dueAt);
+
+    List<Reminder> findByStatusInAndDeliveryStatusAndDueAtLessThanEqual(List<String> statuses, String deliveryStatus, Instant dueAt);
 
     @org.springframework.transaction.annotation.Transactional
     void deleteByUserId(Long userId);

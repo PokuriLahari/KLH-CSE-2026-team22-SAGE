@@ -13,8 +13,8 @@ The fundamental student bottleneck is not a lack of items to do, but **decision 
 **SAGE provides:**
 1. **Real Data Task Management**: Persisted in PostgreSQL with priorities, estimated effort, categories, and deadlines.
 2. **Context-Aware Decision Engine**: Recommends the optimal single focus item based on impending deadlines and available study windows.
-3. **Ask SAGE (AI-Powered Assistant)**: Real AI chat completion grounded in the student's actual database profile and pending tasks using Google Gemini.
-4. **Reliable Email Reminders**: PostgreSQL persistence with an automated Spring background scheduler dispatching alerts via Resend.
+3. **Ask SAGE (AI-Powered Assistant)**: Real AI chat completion grounded in the student's actual database profile and pending tasks using **Groq** (`llama-3.3-70b-versatile` & `llama-3.2-11b-vision-preview`) as primary and **Google Gemini** (`gemini-3.8-flash`) as automatic fallback.
+4. **Reliable Email Reminders**: PostgreSQL persistence with an automated Spring background scheduler dispatching alerts via Brevo / Resend.
 5. **Unified Contest Tracking**: Seamless scheduling of upcoming rounds with customizable lead alerts (`10m`, `30m`, `1h`, `1d`) and automated deduplication.
 6. **Focus Mode**: Distraction-free timer connected directly to priority tasks.
 7. **Strict Multi-User Isolation & Privacy**: User-scoped storage, server-side JWT verification at the gateway, and transactional permanent account deletion.
@@ -33,23 +33,25 @@ graph TD
     Config["Config Server (:8888)"]
     Auth["Auth & Core Service (:8081)<br/>Google OAuth / Tasks / SAGE AI / Reminders"]
     DB[(PostgreSQL :5432<br/>authdb)]
-    Gemini["Google Gemini API<br/>(generativelanguage.googleapis.com)"]
-    Resend["Resend Email API<br/>(api.resend.com)"]
+    Groq["Groq Cloud API (Primary)<br/>llama-3.3-70b-versatile"]
+    Gemini["Google Gemini API (Fallback)<br/>gemini-3.8-flash"]
+    Brevo["Brevo Email API<br/>(api.brevo.com)"]
 
     Client -->|/api/* Requests with Bearer JWT| Gateway
     Gateway -->|Service Discovery| Eureka
     Auth -->|Register & Heartbeat| Eureka
     Gateway -->|Validate JWT, Forward X-User-Id| Auth
     Auth -->|JPA / Hibernate| DB
-    Auth -->|Ask SAGE completions| Gemini
-    Auth -->|Scheduled Worker Email Dispatch| Resend
+    Auth -->|Ask SAGE primary dispatch| Groq
+    Auth -.->|Automatic fallback on failure/quota| Gemini
+    Auth -->|Scheduled Worker Email Dispatch| Brevo
 ```
 
 ### Request Flow
 1. **Authentication**: Client completes Google Identity Services (GIS) flow or development login, receiving a signed HMAC-SHA256 JWT from `auth-service`.
 2. **Gateway Verification**: Every protected request through `api-gateway` (:8080) passes through `JwtValidationFilter`, which cryptographically validates the token, extracts the user ID, sanitizes incoming headers, and injects `X-User-Id`, `X-User-Email`, and `X-User-Role` downstream.
-3. **Ask SAGE Flow**: `POST /api/sage/ask` reaches `auth-service`, resolves the authenticated user, queries active pending tasks from PostgreSQL, constructs a grounded system prompt, and calls Google Gemini API (`gemini-3.8-flash`) via Spring `RestClient`.
-4. **Email Reminders Flow**: Reminders are saved to PostgreSQL via `POST /api/reminders`. A background `@Scheduled` worker scans for due reminders, checks quiet hours and user timezones, formats responsive HTML templates, dispatches via Resend, and records delivery status idempotently.
+3. **Ask SAGE Flow**: `POST /api/sage/ask` reaches `auth-service`, resolves the authenticated user, queries active pending tasks from PostgreSQL, constructs a grounded system prompt, and calls primary provider **Groq Cloud** (`llama-3.3-70b-versatile` / `llama-3.2-11b-vision-preview`). If Groq fails, encounters quota limits (429), or is not configured, it automatically falls back to **Google Gemini** (`gemini-3.8-flash`).
+4. **Email Reminders Flow**: Reminders are saved to PostgreSQL via `POST /api/reminders`. A background `@Scheduled` worker scans for due reminders, checks quiet hours and user timezones, formats responsive HTML templates, dispatches via Brevo, and records delivery status idempotently.
 
 ---
 
@@ -63,8 +65,9 @@ graph TD
 | **API Gateway** | Spring Cloud Gateway (Reactive / WebFlux) | Central reverse proxy, route routing, JWT security (:8080) |
 | **Backend Core** | Spring Boot 4.1 / Spring 7, Java 21 | REST APIs, JPA repositories, scheduled background workers (:8081) |
 | **Database** | PostgreSQL 16+ | Relational persistence (`users`, `tasks`, `reminders`, `deleted_accounts`) |
-| **AI Provider** | Google Gemini API (`gemini-3.8-flash`) | Student-grounded chat completions via Spring `RestClient` |
-| **Email Provider** | Resend API (`api.resend.com`) | Transactional deadline reminder dispatch |
+| **Primary AI Provider** | Groq Cloud API (`llama-3.3-70b-versatile`) | Ultra-fast grounded student reasoning & vision via Spring `RestClient` |
+| **Fallback AI Provider** | Google Gemini API (`gemini-3.8-flash`) | Automatic resilient secondary AI provider |
+| **Email Provider** | Brevo Transactional Email API (`api.brevo.com`) | Transactional deadline reminder dispatch |
 
 ---
 
@@ -87,7 +90,7 @@ soa/
 │       ├── controller/                        # AuthController, ReminderController
 │       ├── model/                             # User, Task, Reminder, DeletedAccount
 │       ├── repository/                        # UserRepository, TaskRepository, ReminderRepository
-│       └── service/                           # GeminiAiService, ResendEmailService, ReminderSchedulerService
+│       └── service/                           # GroqAiService, GeminiAiService, BrevoEmailService, ResendEmailService, ReminderSchedulerService
 ├── Design SAGE Productivity Platform/         # React Frontend (:8443 / :5173)
 │   ├── src/
 │   │   ├── api/client.ts                      # Centralized API client with JWT attachment
@@ -176,8 +179,12 @@ All protected endpoints require an `Authorization: Bearer <JWT>` header or `X-Us
 - `PATCH /api/tasks/{id}`: Updates task status, priority, or deadline.
 - `DELETE /api/tasks/{id}`: Deletes a task.
 
-### Ask SAGE (AI-Powered)
-- `POST /api/sage/ask`: Dispatches student queries to Google Gemini grounded in the user's active database tasks and schedule.
+### Ask SAGE (Multimodal AI-Powered Assistant)
+- `POST /api/sage/ask`: Dispatches student queries and optional document/image attachments to Google Gemini, grounded in the user's active database tasks, schedule, and timezone.
+  - Supports image and PDF attachments (`image/png`, `image/jpeg`, `image/webp`, `image/gif`, `application/pdf`) encoded via official Gemini `inline_data` parts.
+  - Parses forwarded college announcements and circulars, extracting structured task candidates (`title`, `dueDate`, `dueTime`, `priority`, `sourceSnippet`, `confidence`, `isAmbiguous`).
+  - Resolves relative deadlines ("tomorrow at 5 PM", "next Monday") anchored to user calendar date and local timezone (`Asia/Kolkata`).
+  - Parses timetable schedule uploads, providing a conflict-aware preview that detects existing duplicates and room/period collisions before importing.
   - Returns: `{ message, reply, action, reasoning, pendingTasksCount, totalMinutes, topTaskId, topTaskTitle, responseId, model, provider }`.
   - When `GEMINI_API_KEY` is not set: Returns HTTP 503 explaining that credentials are required (never fakes a response).
   - Handles rate limits (HTTP 429), timeouts (HTTP 504), and upstream errors (HTTP 502) gracefully.
@@ -198,7 +205,7 @@ All protected endpoints require an `Authorization: Bearer <JWT>` header or `X-Us
 # In auth-service:
 cd auth-service
 .\mvnw.cmd test
-# Output: 32 tests run, 0 failures, 0 errors (AskSageTests, ReminderServiceTests, GoogleAuthExchangeTests, AuthServiceApplicationTests)
+# Output: 35 tests run, 0 failures, 0 errors (AskSageTests: 14/14, ReminderServiceTests: 7/7, GoogleAuthExchangeTests: 13/13, AuthServiceApplicationTests: 1/1)
 
 # In api-gateway:
 cd ..\api-gateway
@@ -213,15 +220,11 @@ cd "Design SAGE Productivity Platform"
 
 # Run Unit Tests
 npm test
-# Output: 18 tests pass across askSage.test.ts, reminders.test.ts, timetable.test.ts, deletion.test.ts
-
-# TypeScript Type Check
-npx tsc --noEmit
-# Output: 0 errors (Exit code 0)
+# Output: 27 tests pass across askSageChatbot.test.ts, askSage.test.ts, reminders.test.ts, timetable.test.ts, deletion.test.ts
 
 # Production Bundle Build
 npm run build
-# Output: Successfully built in < 1 second
+# Output: Successfully built dist/ with zero errors
 ```
 
 ---

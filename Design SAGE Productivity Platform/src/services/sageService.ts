@@ -16,12 +16,24 @@ export type SageContext = {
   goalIds?: string[]
   includeTodaySchedule?: boolean
   includeUpcomingExams?: boolean
+  userTimezone?: string
+  currentDate?: string
+  currentDayOfWeek?: string
+  currentTime?: string
+  currentHour?: number
+}
+
+export type SageAttachment = {
+  mimeType: string
+  data: string
+  name?: string
 }
 
 export type SageRequest = {
   message: string
   conversationId?: string
   context?: SageContext
+  attachment?: SageAttachment
 }
 
 export type SageResponse = {
@@ -62,19 +74,22 @@ export async function askSage(
   request: SageRequest,
   signal?: AbortSignal,
 ): Promise<SageResponse> {
-  const trimmed = request.message.trim()
-  if (!trimmed) {
+  const trimmed = request.message ? request.message.trim() : ""
+  if (!trimmed && !request.attachment) {
     throw new Error("Message cannot be empty.")
   }
+
+  const promptText = trimmed || "Please analyze this attached document/image for academic tasks and timetable schedule."
 
   try {
     const data = await apiClient.post<BackendSageAskResponse>(
       "/sage/ask",
       {
-        message: trimmed,
-        prompt: trimmed, // Backend accepts both prompt and message
+        message: promptText,
+        prompt: promptText, // Backend accepts both prompt and message
         conversationId: request.conversationId,
         context: request.context,
+        attachment: request.attachment,
       },
       { signal },
     )

@@ -42,6 +42,45 @@ export type TestEmailResponse = {
 }
 
 /**
+ * Maps a backend persisted reminder entity to the frontend Reminder model.
+ */
+export function backendReminderToFrontend(b: BackendReminder): Reminder {
+  let date = ""
+  let time = "09:00"
+  if (b.dueAt) {
+    try {
+      const dt = new Date(b.dueAt)
+      if (!isNaN(dt.getTime())) {
+        date = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`
+        time = `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`
+      }
+    } catch {}
+  }
+  return {
+    id: b.id,
+    title: b.title,
+    date,
+    time,
+    dueAt: b.dueAt,
+    createdAt: b.createdAt || new Date().toISOString(),
+    completedAt: b.completedAt,
+    snoozedUntil: b.snoozedUntil,
+    status: (b.status === "completed" || b.status === "snoozed") ? b.status : "open",
+    method: b.method || "Email + In-app",
+    read: b.deliveryStatus === "DELIVERED",
+    dismissed: b.status === "dismissed",
+    notificationTiming: (b.notificationTiming as any) || "exact",
+    notifiedAt: b.notifiedAt,
+    targetType: b.targetType as any,
+    targetId: b.targetId,
+    contestId: b.contestId,
+    platform: b.platform,
+    contestUrl: b.contestUrl,
+    eventStartTime: b.eventStartTime,
+  }
+}
+
+/**
  * Fetches all persisted reminders for the authenticated student from PostgreSQL.
  */
 export async function getBackendReminders(): Promise<BackendReminder[]> {

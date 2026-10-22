@@ -103,11 +103,32 @@ public class ReminderController {
         String contestId = payload.containsKey("contestId") && payload.get("contestId") != null
                 ? payload.get("contestId").toString()
                 : null;
+        String targetId = payload.containsKey("targetId") && payload.get("targetId") != null
+                ? payload.get("targetId").toString()
+                : null;
 
-        // Deduplication: If this is a contest reminder and one already exists for this contest, update it
+        // Deduplication:
+        // 1. By explicit ID if provided and belongs to user
+        // 2. By contest ID if contest reminder
+        // 3. By targetType + targetId if task/exam deadline
         Reminder reminder = null;
-        if ("contest".equalsIgnoreCase(targetType) && contestId != null) {
+        if (payload.containsKey("id") && payload.get("id") != null) {
+            try {
+                Long rId = Long.parseLong(payload.get("id").toString());
+                Optional<Reminder> opt = reminderRepository.findByIdAndUserId(rId, userId);
+                if (opt.isPresent()) {
+                    reminder = opt.get();
+                }
+            } catch (Exception ignored) {}
+        }
+        if (reminder == null && "contest".equalsIgnoreCase(targetType) && contestId != null) {
             List<Reminder> existing = reminderRepository.findByUserIdAndTargetTypeAndContestId(userId, targetType, contestId);
+            if (!existing.isEmpty()) {
+                reminder = existing.get(0);
+            }
+        }
+        if (reminder == null && targetId != null && !targetId.isBlank()) {
+            List<Reminder> existing = reminderRepository.findByUserIdAndTargetTypeAndTargetId(userId, targetType, targetId);
             if (!existing.isEmpty()) {
                 reminder = existing.get(0);
             }
@@ -118,16 +139,22 @@ public class ReminderController {
             reminder.setUserId(userId);
             reminder.setDeliveryStatus("PENDING");
             reminder.setDeliveryAttempts(0);
+        } else {
+            // If updating an active reminder whose due time changed, reset delivery status so it re-triggers
+            if (!dueAt.equals(reminder.getDueAt())) {
+                reminder.setDeliveryStatus("PENDING");
+                reminder.setNotifiedAt(null);
+            }
         }
 
         reminder.setTitle(title);
         reminder.setDueAt(dueAt);
         reminder.setStatus(payload.getOrDefault("status", "open").toString());
-        reminder.setMethod(payload.getOrDefault("method", "Email").toString());
+        reminder.setMethod(payload.getOrDefault("method", "Email + In-app").toString());
         reminder.setNotificationTiming(payload.getOrDefault("notificationTiming", "exact").toString());
         reminder.setTargetType(targetType);
-        if (payload.containsKey("targetId") && payload.get("targetId") != null) {
-            reminder.setTargetId(payload.get("targetId").toString());
+        if (targetId != null) {
+            reminder.setTargetId(targetId);
         }
         if (contestId != null) {
             reminder.setContestId(contestId);
@@ -183,10 +210,16 @@ public class ReminderController {
         }
         if (updates.containsKey("snoozedUntil") && updates.get("snoozedUntil") != null) {
             try {
-                reminder.setSnoozedUntil(Instant.parse(updates.get("snoozedUntil").toString()));
+                Instant snoozedTime = Instant.parse(updates.get("snoozedUntil").toString());
+                reminder.setSnoozedUntil(snoozedTime);
+                reminder.setDueAt(snoozedTime);
                 reminder.setStatus("snoozed");
                 reminder.setDeliveryStatus("PENDING");
+                reminder.setNotifiedAt(null);
             } catch (Exception ignored) {}
+        }
+        if (updates.containsKey("method") && updates.get("method") != null) {
+            reminder.setMethod(updates.get("method").toString());
         }
 
         Reminder saved = reminderRepository.save(reminder);
@@ -256,14 +289,16 @@ public class ReminderController {
                 html
         );
 
+        String provider = resendEmailService.getActiveProviderName();
         Map<String, Object> response = new HashMap<>();
         response.put("success", result.success());
         response.put("recipient", toEmail);
         response.put("configured", resendEmailService.isConfigured());
+        response.put("provider", provider);
 
         if (result.success()) {
             response.put("messageId", result.messageId());
-            response.put("message", "Test reminder email delivered successfully via Resend.");
+            response.put("message", "Test reminder email delivered successfully via " + provider + ".");
             return ResponseEntity.ok(response);
         } else {
             response.put("error", result.errorMessage());

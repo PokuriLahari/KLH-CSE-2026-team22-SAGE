@@ -22,13 +22,17 @@ public class ResendEmailService {
 
     private static final Logger log = LoggerFactory.getLogger(ResendEmailService.class);
 
+    private final BrevoEmailService brevoEmailService;
     private final String apiKey;
     private final String fromAddress;
     private final RestClient restClient;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ResendEmailService(
+            @org.springframework.beans.factory.annotation.Autowired(required = false) BrevoEmailService brevoEmailService,
             @Value("${sage.email.resend.api-key:}") String apiKey,
             @Value("${sage.email.resend.from:SAGE <onboarding@resend.dev>}") String fromAddress) {
+        this.brevoEmailService = brevoEmailService;
         this.apiKey = apiKey != null ? apiKey.trim() : "";
         this.fromAddress = (fromAddress != null && !fromAddress.isBlank()) ? fromAddress.trim() : "SAGE <onboarding@resend.dev>";
 
@@ -42,17 +46,42 @@ public class ResendEmailService {
                 .build();
     }
 
+    public ResendEmailService(
+            String apiKey,
+            String fromAddress) {
+        this(null, apiKey, fromAddress);
+    }
+
     public boolean isConfigured() {
+        if (brevoEmailService != null && brevoEmailService.isConfigured()) {
+            return true;
+        }
         return !apiKey.isEmpty() && !apiKey.equalsIgnoreCase("dummy") && !apiKey.equalsIgnoreCase("placeholder");
     }
 
+    public String getActiveProviderName() {
+        if (brevoEmailService != null && brevoEmailService.isConfigured()) {
+            return "Brevo";
+        }
+        return "Resend";
+    }
+
     public String getFromAddress() {
+        if (brevoEmailService != null && brevoEmailService.isConfigured()) {
+            return brevoEmailService.getSenderName() + " <" + brevoEmailService.getSenderEmail() + ">";
+        }
         return fromAddress;
     }
 
     public EmailDeliveryResult sendEmail(String toEmail, String subject, String htmlContent) {
+        if (brevoEmailService != null && brevoEmailService.isConfigured()) {
+            log.info("Routing email delivery through active Brevo transactional service");
+            BrevoEmailService.EmailDeliveryResult brevoResult = brevoEmailService.sendEmail(toEmail, subject, htmlContent);
+            return new EmailDeliveryResult(brevoResult.success(), brevoResult.messageId(), brevoResult.errorMessage());
+        }
+
         if (!isConfigured()) {
-            String msg = "Resend API key is not configured. Set RESEND_API_KEY in the backend environment.";
+            String msg = "Email provider is not configured. Set BREVO_API_KEY or RESEND_API_KEY in the backend environment.";
             log.warn("Cannot send email reminder: {}", msg);
             return new EmailDeliveryResult(false, null, msg);
         }

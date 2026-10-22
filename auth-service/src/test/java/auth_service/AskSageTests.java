@@ -10,6 +10,7 @@ import auth_service.repository.TaskRepository;
 import auth_service.repository.UserRepository;
 import auth_service.service.GoogleTokenVerifier;
 import auth_service.service.GeminiAiService;
+import auth_service.service.GroqAiService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -338,4 +339,235 @@ public class AskSageTests {
 
         mockServer.verify();
     }
+
+    @Test
+    void testMultimodalGeminiInvocationWithImageAttachment() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+
+        String mockResponseBody = """
+                {
+                  "candidates": [
+                    {
+                      "content": {
+                        "parts": [
+                          { "text": "Extracted 1 assignment from exam circular.\\n\\n```sage-action\\n{\\n  \\"type\\": \\"tasks\\",\\n  \\"items\\": [\\n    {\\n      \\"title\\": \\"Physics Assignment 4\\",\\n      \\"deadline\\": \\"2026-10-25T17:00:00\\",\\n      \\"priority\\": \\"HIGH\\",\\n      \\"confidence\\": \\"HIGH\\"\\n    }\\n  ]\\n}\\n```" }
+                        ],
+                        "role": "model"
+                      },
+                      "finishReason": "STOP",
+                      "index": 0
+                    }
+                  ],
+                  "modelVersion": "gemini-3.8-flash",
+                  "responseId": "gemini-multimodal-001"
+                }
+                """;
+
+        // Expect request containing inline_data part
+        mockServer.expect(requestTo("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("x-goog-api-key", "test-secret-key"))
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.contents[0].parts[0].inline_data.mime_type").value("image/png"))
+                .andExpect(jsonPath("$.contents[0].parts[0].inline_data.data").value("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+                .andRespond(withSuccess(mockResponseBody, MediaType.APPLICATION_JSON));
+
+        RestClient restClient = builder.baseUrl("https://generativelanguage.googleapis.com/v1beta").build();
+        GeminiAiService geminiService = new GeminiAiService("test-secret-key", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 25, restClient);
+
+        Map<String, Object> attachment = Map.of(
+                "name", "exam_notice.png",
+                "mimeType", "image/png",
+                "data", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        );
+
+        GeminiAiService.SageAiResult result = geminiService.generateResponse(
+                testUser,
+                List.of(),
+                "Please parse this notice",
+                Map.of(),
+                attachment
+        );
+
+        assertNotNull(result);
+        assertTrue(result.content().contains("Physics Assignment 4"));
+        assertTrue(result.content().contains("```sage-action"));
+        assertEquals("gemini-multimodal-001", result.responseId());
+        mockServer.verify();
+    }
+
+    @Test
+    void testMultimodalGeminiRejectsUnsupportedMimeType() {
+        GeminiAiService geminiService = new GeminiAiService("test-key", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 25);
+
+        Map<String, Object> badAttachment = Map.of(
+                "name", "script.exe",
+                "mimeType", "application/x-msdownload",
+                "data", "dGVzdA=="
+        );
+
+        GeminiAiService.AiServiceException ex = assertThrows(GeminiAiService.AiServiceException.class, () -> {
+            geminiService.generateResponse(testUser, List.of(), "Analyze this", Map.of(), badAttachment);
+        });
+
+        assertTrue(ex.getMessage().contains("Unsupported attachment type"));
+    }
+
+    @Test
+    void testTaskCreationEnforcesOwnershipAndIdempotency() {
+        GoogleTokenVerifier mockVerifier = mock(GoogleTokenVerifier.class);
+        GeminiAiService mockAiService = mock(GeminiAiService.class);
+        AuthController controller = new AuthController(userRepository, taskRepository, deletedAccountRepository,
+                reminderRepository, mockVerifier, mockAiService, jwtUtils);
+
+        Task input = new Task();
+        input.setTitle("Calculus Problem Set 2");
+        input.setDeadline("2026-10-24T23:59:00");
+        input.setPriority("HIGH");
+        input.setEstimatedMinutes(60);
+        // Attempt to supply a forged user id
+        input.setUserId(999999L);
+
+        // 1. First creation
+        ResponseEntity<?> firstResp = controller.createTask(
+                String.valueOf(testUser.getId()),
+                "Bearer " + testToken,
+                input
+        );
+        assertEquals(HttpStatus.CREATED, firstResp.getStatusCode());
+        Task createdTask = (Task) firstResp.getBody();
+        assertNotNull(createdTask);
+        // Server MUST enforce authenticated user id, ignoring client-provided 999999L
+        assertEquals(testUser.getId(), createdTask.getUserId());
+        assertEquals("Calculus Problem Set 2", createdTask.getTitle());
+
+        // 2. Idempotent second creation with same title and deadline
+        ResponseEntity<?> secondResp = controller.createTask(
+                String.valueOf(testUser.getId()),
+                "Bearer " + testToken,
+                input
+        );
+        assertEquals(HttpStatus.OK, secondResp.getStatusCode(), "Repeated creation should return existing task with 200 OK");
+        Task duplicateResult = (Task) secondResp.getBody();
+        assertNotNull(duplicateResult);
+        assertEquals(createdTask.getId(), duplicateResult.getId(), "Should return existing task id without creating duplicates");
+
+        // Verify total tasks in DB for user is still exactly 1
+        List<Task> userTasks = taskRepository.findByUserIdOrderByCreatedAtDesc(testUser.getId());
+        assertEquals(1, userTasks.size());
+    }
+
+    @Test
+    void testPrimaryGroqSuccessReturnsGroqProviderInAskSageEndpoint() {
+        GoogleTokenVerifier mockVerifier = mock(GoogleTokenVerifier.class);
+        GroqAiService mockGroq = mock(GroqAiService.class);
+        when(mockGroq.isConfigured()).thenReturn(true);
+        when(mockGroq.getModel()).thenReturn("llama-3.3-70b-versatile");
+        when(mockGroq.generateResponse(any(User.class), anyList(), anyString(), anyMap(), any()))
+                .thenReturn(new GeminiAiService.SageAiResult(
+                        "Here is your Groq-optimized study plan.",
+                        "chatcmpl-test-groq-1",
+                        "llama-3.3-70b-versatile",
+                        "groq"
+                ));
+
+        GeminiAiService orchestrator = new GeminiAiService(mockGroq, "test-gemini-key", "https://gemini.api", "gemini-3.8-flash", 25, mock(RestClient.class));
+        AuthController controller = new AuthController(userRepository, taskRepository, deletedAccountRepository,
+                reminderRepository, mockVerifier, orchestrator, jwtUtils);
+
+        ResponseEntity<?> response = controller.askSage(String.valueOf(testUser.getId()), null,
+                Map.of("message", "What should I do?"));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertNotNull(body);
+        assertEquals("groq", body.get("provider"));
+        assertEquals("llama-3.3-70b-versatile", body.get("model"));
+        assertEquals("Here is your Groq-optimized study plan.", body.get("message"));
+        assertTrue(body.get("reasoning").toString().contains("groq"));
+    }
+
+    @Test
+    void testPrimaryGroqFailureFallsBackToGoogleGemini() {
+        GroqAiService mockGroq = mock(GroqAiService.class);
+        when(mockGroq.isConfigured()).thenReturn(true);
+        when(mockGroq.getModel()).thenReturn("llama-3.3-70b-versatile");
+        // Simulate Groq rate limiting failure (429)
+        when(mockGroq.generateResponse(any(User.class), anyList(), anyString(), anyMap(), any()))
+                .thenThrow(new GeminiAiService.AiRateLimitException("Groq rate limit exceeded"));
+
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+        String mockGeminiJson = """
+                {
+                  "candidates": [
+                    {
+                      "content": {
+                        "parts": [
+                          { "text": "Fallback plan from Google Gemini." }
+                        ],
+                        "role": "model"
+                      },
+                      "finishReason": "STOP",
+                      "index": 0
+                    }
+                  ],
+                  "responseId": "gemini-fallback-123"
+                }
+                """;
+        mockServer.expect(requestTo("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess(mockGeminiJson, MediaType.APPLICATION_JSON));
+
+        RestClient restClient = builder.baseUrl("https://generativelanguage.googleapis.com/v1beta").build();
+        GeminiAiService orchestrator = new GeminiAiService(mockGroq, "test-gemini-key", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 25, restClient);
+
+        GeminiAiService.SageAiResult result = orchestrator.generateResponse(testUser, List.of(), "Study plan", Map.of(), null);
+        assertNotNull(result);
+        assertEquals("Fallback plan from Google Gemini.", result.content());
+        assertEquals("google-gemini", result.provider());
+        assertEquals("gemini-fallback-123", result.responseId());
+        mockServer.verify();
+    }
+
+    @Test
+    void testUnconfiguredGroqFallsBackToGeminiDirectly() {
+        GroqAiService mockGroq = mock(GroqAiService.class);
+        when(mockGroq.isConfigured()).thenReturn(false);
+
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer mockServer = MockRestServiceServer.bindTo(builder).build();
+        String mockGeminiJson = """
+                {
+                  "candidates": [
+                    {
+                      "content": {
+                        "parts": [
+                          { "text": "Direct answer from Google Gemini." }
+                        ],
+                        "role": "model"
+                      },
+                      "finishReason": "STOP",
+                      "index": 0
+                    }
+                  ],
+                  "responseId": "gemini-direct-456"
+                }
+                """;
+        mockServer.expect(requestTo("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess(mockGeminiJson, MediaType.APPLICATION_JSON));
+
+        RestClient restClient = builder.baseUrl("https://generativelanguage.googleapis.com/v1beta").build();
+        GeminiAiService orchestrator = new GeminiAiService(mockGroq, "test-gemini-key", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 25, restClient);
+
+        GeminiAiService.SageAiResult result = orchestrator.generateResponse(testUser, List.of(), "Study plan", Map.of(), null);
+        assertNotNull(result);
+        assertEquals("Direct answer from Google Gemini.", result.content());
+        assertEquals("google-gemini", result.provider());
+        mockServer.verify();
+    }
 }
+

@@ -50,7 +50,8 @@ public class ReminderSchedulerService {
         }
 
         Instant now = Instant.now();
-        List<Reminder> duePending = reminderRepository.findByStatusAndDeliveryStatusAndDueAtLessThanEqual("open", "PENDING", now);
+        List<Reminder> duePending = reminderRepository.findByStatusInAndDeliveryStatusAndDueAtLessThanEqual(
+                List.of("open", "snoozed"), "PENDING", now);
 
         if (!duePending.isEmpty()) {
             log.info("Reminder worker: Found {} pending reminder(s) due at or before {}", duePending.size(), now);
@@ -68,8 +69,8 @@ public class ReminderSchedulerService {
             return;
         }
 
-        // Method verification
-        String method = reminder.getMethod() != null ? reminder.getMethod() : "Email";
+        // Method verification (matches "email", "Email + In-app", etc.)
+        String method = reminder.getMethod() != null ? reminder.getMethod() : "Email + In-app";
         if (!method.toLowerCase().contains("email")) {
             reminder.setDeliveryStatus("SKIPPED");
             reminder.setDeliveryError("Method is in-app only, email dispatch skipped");
@@ -97,10 +98,12 @@ public class ReminderSchedulerService {
             return;
         }
 
-        // Check quiet hours in user's timezone (skip quiet hours for contest, exam, and urgent deadlines)
+        // Check quiet hours in user's timezone (skip quiet hours for contest, exam, task deadlines, and scheduled user reminders)
+        boolean isExplicitlyScheduled = reminder.getDueAt() != null;
         boolean isUrgentDeadline = "contest".equalsIgnoreCase(reminder.getTargetType())
                 || "exam".equalsIgnoreCase(reminder.getTargetType())
-                || "task".equalsIgnoreCase(reminder.getTargetType());
+                || "task".equalsIgnoreCase(reminder.getTargetType())
+                || isExplicitlyScheduled;
 
         if (!isUrgentDeadline && isInsideQuietHours(user, now)) {
             log.info("Quiet hours active for user {}, postponing non-urgent reminder id={}", user.getId(), reminder.getId());

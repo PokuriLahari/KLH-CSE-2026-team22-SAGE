@@ -56,7 +56,7 @@ export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   contests: true,
   quietHours: "10:00 PM – 7:00 AM",
   timing: "exact",
-  browserNotifications: false,
+  browserNotifications: true,
 }
 
 export const TIMING_OFFSETS_MS: Record<ReminderTiming, number> = {
@@ -290,7 +290,7 @@ export function normalizeReminder(raw: RawReminderInput): Reminder {
     completedAt: raw.completedAt,
     snoozedUntil: raw.snoozedUntil,
     status: raw.status || "open",
-    method: raw.method || "In-app",
+    method: raw.method || "Email + In-app",
     read: Boolean(raw.read),
     dismissed: Boolean(raw.dismissed),
     notificationTiming: raw.notificationTiming || "exact",
@@ -357,7 +357,7 @@ export function upsertContestReminder(
         ? reminders[existingIndex].createdAt
         : new Date().toISOString(),
     notificationTiming: timing,
-    method: "In-app",
+    method: "Email + In-app",
     status: "open",
     read: false,
     dismissed: false,
@@ -376,6 +376,85 @@ export function upsertContestReminder(
   }
 
   return [...reminders, updatedReminder]
+}
+
+export type TaskDeadlineReminderInput = {
+  id: number | string
+  title: string
+  dueDate: string
+  dueTime?: string
+}
+
+/**
+ * Creates or updates a deadline reminder for a task.
+ * Ensures the student receives both in-app notification and email before/at the deadline.
+ */
+export function buildTaskDeadlineReminder(
+  task: TaskDeadlineReminderInput,
+  timing: ReminderTiming = "exact",
+): Reminder {
+  const dateStr = task.dueDate.trim()
+  const timeStr =
+    task.dueTime && /^\d{1,2}:\d{2}$/.test(task.dueTime.trim())
+      ? task.dueTime.trim()
+      : "18:00"
+  const dueAt = buildDueAtTimestamp(dateStr, timeStr)
+  return normalizeReminder({
+    id: Date.now(),
+    title: `Deadline: ${task.title.trim()}`,
+    date: dateStr,
+    time: timeStr,
+    dueAt,
+    createdAt: new Date().toISOString(),
+    notificationTiming: timing,
+    method: "Email + In-app",
+    status: "open",
+    read: false,
+    dismissed: false,
+    targetType: "task",
+    targetId: String(task.id),
+    eventStartTime: `${dateStr} ${timeStr}`,
+  })
+}
+
+export function upsertTaskDeadlineReminder(
+  reminders: Reminder[],
+  task: TaskDeadlineReminderInput,
+  timing: ReminderTiming = "exact",
+): Reminder[] {
+  if (!task.dueDate) return reminders
+  const existingIndex = reminders.findIndex(
+    (r) => r.targetType === "task" && String(r.targetId) === String(task.id),
+  )
+  const newReminder = buildTaskDeadlineReminder(task, timing)
+  if (existingIndex >= 0) {
+    const updated = normalizeReminder({
+      ...reminders[existingIndex],
+      title: newReminder.title,
+      date: newReminder.date,
+      time: newReminder.time,
+      dueAt: newReminder.dueAt,
+      method: "Email + In-app",
+      status: "open",
+      read: false,
+      dismissed: false,
+      notifiedAt: undefined,
+      eventStartTime: newReminder.eventStartTime,
+    })
+    const next = [...reminders]
+    next[existingIndex] = updated
+    return next
+  }
+  return [...reminders, newReminder]
+}
+
+export function removeTaskDeadlineReminder(
+  reminders: Reminder[],
+  taskId: number | string,
+): Reminder[] {
+  return reminders.filter(
+    (r) => !(r.targetType === "task" && String(r.targetId) === String(taskId)),
+  )
 }
 
 /**

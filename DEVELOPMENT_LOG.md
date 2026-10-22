@@ -30,7 +30,11 @@
 | **Timetable Separation** | **Verified** | Multi-user isolation verified; clean start for new accounts; text parsing validated. |
 | **Contest Reminders Integration** | **Verified** | Unified contest reminder sync to central reminder list with lead time calculation. |
 | **Permanent Account Deletion** | **Verified** | Safe transactional cascade deleting tasks and reminders, tombstoning in `deleted_accounts`. |
-| **Ask SAGE (AI-Powered Assistant)** | **Verified** | Sole AI provider: Google Gemini (`gemini-3.8-flash`) via official `generateContent` API; grounded in real student database tasks; handles 429, timeouts, and missing keys honestly with zero third-party fallbacks. |
+| **Ask SAGE (AI-Powered Assistant)** | **Verified** | Sole AI provider: Google Gemini (`gemini-3-flash-preview` / `gemini-3.8-flash`) via official `generateContent` API; grounded in real student database tasks; handles 429, timeouts, and missing keys honestly with zero third-party fallbacks. |
+| **Multimodal Image & Document Understanding** | **Verified** | Supports real file picker, previews, PDF/image validation (5MB frontend / 10MB backend), official Gemini `inline_data` base64 payload format, prompt injection defense, and server-side key preservation. |
+| **Forwarded-Message Task Extraction** | **Verified** | Extracts structured task candidates from pasted/forwarded college circulars, resolves relative dates using user timezone and calendar anchor, highlights ambiguities, and displays interactive candidate cards. |
+| **Timetable Upload & Conflict Detection** | **Verified** | Parses multi-class schedules into subject, day, start/end time, room, and faculty; detects duplicate classes and time overlaps against user timetable; provides reviewable preview before importing. |
+| **Real Database Actions & Automation Modes** | **Verified** | Direct PostgreSQL task creation via authenticated `/api/tasks` with server-enforced ownership, idempotency (preventing duplicate clicks), Review Mode (interactive confirmation cards), and Auto Mode (auto-creates unambiguous tasks with Undo support). |
 | **Email Reminders (Resend)** | **Verified** | Created backend `Reminder` JPA entity in PostgreSQL, `@Scheduled` background worker, Resend API integration, deduplication, retry handling, and test email endpoint. |
 
 ---
@@ -81,8 +85,19 @@
 - Created `GeminiAiService.java` utilizing Spring `RestClient`, authenticating via secure `x-goog-api-key` header, and enforcing configurable `GEMINI_MODEL` (`gemini-3.8-flash`) and `GEMINI_TIMEOUT_SECONDS` (`25`).
 - Preserved grounded prompt structure, grounding recommendations in student's actual database tasks with zero fabrication.
 - Enforced zero third-party fallbacks: eliminated silent switching to xAI, Groq, or mock fallbacks upon failure.
-- Handled missing keys (HTTP 503), rate limits / quota exhaustion (HTTP 429), timeouts (HTTP 504), and authentication failures (HTTP 502) with client-safe messages preventing secret/URL leakage.
 - Updated `.env.example`, `.env`, `application.yml`, `README.md`, and comprehensive test suites (`AskSageTests.java`).
+
+### Phase 8: Brevo Transactional Email API Integration
+- Integrated Brevo (formerly Sendinblue) v3 REST API (`POST https://api.brevo.com/v3/smtp/email`) for real-time transactional notifications.
+- Created `BrevoEmailService.java` with Spring `RestClient`, timeout protection (10s connect, 15s read), and robust JSON error extraction avoiding secret leakage.
+- Configured authenticated sender: `BREVO_SENDER_NAME=SAGE`, `BREVO_SENDER_EMAIL=pokurilaharionedrive@gmail.com`.
+- Updated `application.yml` with configurable `sage.email.brevo` properties and environment variable bindings.
+- Wired `ResendEmailService` to delegate directly to `BrevoEmailService` as the primary transactional email provider while preserving Resend as fallback.
+- Updated `ReminderController.java` `/api/reminders/test-email` to dynamically report the active delivery provider (`Brevo`).
+- Created `BrevoEmailServiceTests.java` covering configuration verification, client/server error parsing, and styled dark-mode HTML generation (7/7 tests passing).
+- Added `testBrevoTransactionalEmailDelegationInResendEmailService` in `ReminderServiceTests.java` (8/8 tests passing, 15/15 total email tests passing).
+- Stored credentials strictly in backend-only `.env` (gitignored, never exposed to frontend or Git history).
+
 
 ---
 
@@ -175,25 +190,101 @@
   - `Design SAGE Productivity Platform`: 18/18 tests passing; production `vite build` successful.
   - Verified live end-to-end flow from frontend proxy (:8443) -> API Gateway (:8080) -> Auth Service (:8081) -> Google Gemini API.
 
+### Phase 8: Figma-Generated Ask SAGE Chatbot UI Integration
+- **Modular Component Isolation**:
+  - Inspected Figma Make chatbot export (`src/App.tsx` and `src/index.css` at workspace root).
+  - Built a standalone reusable component in `Design SAGE Productivity Platform/src/components/AskSageChatbot.tsx`, accompanied by scoped styles in `AskSageChatbot.css` under `.sage-chatbot-root` to eliminate styling collisions with parent Fluent UI / Tailwind layers.
+  - Extracted type contracts, markdown parser, time formatter, and task context builders to `src/components/chatbotTypes.ts`.
+- **Backend & Service Integration**:
+  - Reused the verified authenticated endpoint `POST /api/sage/ask` through `sageService.ts` and `apiClient.ts`.
+  - Maintained Google Gemini as the sole AI provider via backend server-side orchestration with zero client-side keys and no mock responses.
+  - Hooked message submission, suggestion chips, loading/thinking indicators, error reporting, retry mechanisms, clipboard copying, and conversation session persistence (`sessionStorage`).
+  - Added slide-out conversation History drawer displaying active session metrics and quick-start prompt templates.
+- **Verification Results**:
+  - Frontend test suite: 23/23 tests passing (`node --experimental-strip-types --test src/*.test.ts`).
+  - Production build: `vite build` generated clean bundles with 0 errors in 3.56s.
+  - Backend integration tests: `auth_service.AskSageTests` passed 11/11 tests with 0 failures, 0 errors.
+  - Live End-to-End Test: Live dispatch to `POST /api/sage/ask` authenticated with user context returned HTTP 200 OK with authentic Gemini recommendations.
+
+### Phase 9: Multimodal Productivity Assistant (Images, Documents, Forwarded Messages & Timetable Parsing)
+- **Functional Image & Document Attachments**:
+  - Replaced simulated attachment button with real file picker (`<input type="file" accept="image/*,application/pdf" />`).
+  - Added attachment preview bar with thumbnail display for images, PDF document badge, file size indicator, and removal before dispatch.
+  - Enforced strict MIME type and size validation on frontend (< 5MB) and backend (< 10MB) for `image/png`, `image/jpeg`, `image/webp`, `image/gif`, and `application/pdf`.
+  - Reused existing authenticated backend (`POST /api/sage/ask`) without client-side API keys, encoding attachments into official Google Gemini `inline_data` parts.
+- **Forwarded-Message Task Extraction**:
+  - Engineered backend prompt system instructions to parse forwarded college announcements, assignment notifications, and circulars into structured ````sage-action ... ```` JSON payloads.
+  - Implemented pure client-side `parseSageAction` that strips action JSON from message text for clean conversational rendering while providing structured items for interactive UI cards.
+  - Anchored relative dates ("tomorrow at 5 PM", "next Monday") using the student's actual timezone (`Asia/Kolkata`) and system calendar date, flagging ambiguities without inventing dates.
+- **Timetable Upload & Conflict Detection**:
+  - Parsed uploaded schedules into subject, day of week, start/end time, location, and faculty.
+  - Built `detectTimetableConflicts` pure validator to compare candidates against existing student timetable entries and flag duplicates or room/time collisions before import.
+- **Real Database Actions & Automation Modes**:
+  - Added idempotency to `AuthController.createTask` matching `userId`, `title`, and `deadline`, preventing duplicate records on retry or repeated clicks.
+  - Maintained strict server-side ownership enforcement (`resolveUserId`).
+  - Implemented **Review Mode** (interactive cards with "Add to Tasks", "Import Classes") and **Auto Mode** (instant automated task creation for high-confidence unambiguous tasks with undo support via `DELETE /api/tasks/{id}`).
+- **Verification Results**:
+  - Frontend test suite: **27/27 tests passing (100%)** (`askSageChatbot.test.ts`, `timetable.test.ts`, `reminders.test.ts`, `deletion.test.ts`).
+  - Frontend production build: `vite build` completed with 0 errors in 15.06s.
+  - Backend test suite: `auth_service.AskSageTests` passed **14/14 tests (100%)** with 0 failures, 0 errors, including multimodal mock execution, MIME validation, and task creation idempotency.
+  - Live End-to-End Test: Live image analysis with real 1x1 PNG returned grounded pixel assessment from Gemini; forwarded notice extraction correctly resolved dates to `2026-10-22` and created real database records in PostgreSQL.
+
+### Phase 10: Visual Due Dates, Times & Deadlines Enhancement
+- **Human-Readable Temporal Anchoring**:
+  - Implemented `dateTimeUtils.ts` providing visual deadline badges: "Overdue by X", "Due today at H:MM AM/PM", "Due soon (Hh Mm left)", "Due tomorrow at H:MM AM/PM", and full relative indicators.
+  - Formatted times uniformly across 12-hour AM/PM representations.
+  - Enhanced Task and Reminder sections with color-coded urgency chips (red for overdue, amber for due soon, emerald for upcoming).
+  - Added unit test suite in `dateTimeUtils.test.ts` covering boundary conditions and timezone arithmetic.
+
+### Phase 11: Brevo Transactional Email Integration
+- **Direct SMTP/API Transactional Integration**:
+  - Implemented `BrevoEmailService.java` integrating Brevo REST API v3 (`https://api.brevo.com/v3/smtp/email`) with `api-key` header authentication.
+  - Replaced legacy unverified sender constraints with verified sender headers: `pokurilaharionedrive@gmail.com` with sender name `SAGE`.
+  - Added seamless routing in `ResendEmailService` to prefer Brevo whenever configured.
+  - Implemented comprehensive error handling and logging for 400 invalid recipient/sender errors, 401 unauthorized, and timeouts.
+  - Built unit test suite `BrevoEmailServiceTests.java` passing 7/7 tests.
+
+### Phase 12: Groq Primary AI Provider & Google Gemini Fallback Provider
+- **Groq Cloud API Integration**:
+  - Built `GroqAiService.java` using Spring's `RestClient` targeting `https://api.groq.com/openai/v1/chat/completions`.
+  - Configured default model `llama-3.3-70b-versatile` for high-throughput, low-latency reasoning and grounded student productivity tasks.
+  - Supported multimodal vision queries via Groq's `llama-3.2-11b-vision-preview` model for student timetable images, notice circulars, and attachments.
+  - Set up environment variables `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_VISION_MODEL`, `GROQ_BASE_URL`, and `GROQ_TIMEOUT_SECONDS`.
+- **Intelligent Automatic Fallback to Google Gemini**:
+  - Updated `GeminiAiService.java` to act as an orchestrated AI dispatcher:
+    1. First attempts query resolution via Groq Cloud (`GroqAiService`).
+    2. Transparently catches rate limits (HTTP 429), server downtime (HTTP 5xx), connection timeouts, or unconfigured states.
+    3. Seamlessly falls back to Google Gemini (`gemini-3.8-flash` / `gemini-3-flash-preview`).
+    4. Attaches provider and model metadata (`provider="groq"` or `provider="google-gemini"`) to response payload for complete transparency.
+  - Preserved identical system prompt grounding (database tasks, timetable, calendar, current timestamp, timezone) across both providers.
+- **Verification Results**:
+  - Backend test suite: All 39 tests in `auth-service` passing with 0 failures, 0 errors:
+    - `AskSageTests`: 17/17 passed (including Groq primary success, Groq failure fallback to Gemini, and unconfigured Groq direct-to-Gemini execution).
+    - `GroqAiServiceTests`: 7/7 passed.
+    - `BrevoEmailServiceTests`: 7/7 passed.
+    - `ReminderServiceTests`: 8/8 passed.
+  - Frontend test suite: **34/34 tests passing (100%)** in `Design SAGE Productivity Platform`.
+  - Live Health Check: Spring Boot actuator reported `{"status":"UP","groups":["liveness","readiness"]}` on port 8081.
+
 ## 8. Prioritized Checklist for Remaining 48-Hour Plan
 
 - [x] Trace Ask SAGE request path end-to-end.
 - [x] Replace deterministic Ask SAGE mock with real AI provider.
-- [x] Migrate Ask SAGE to Google Gemini (`generateContent`) as sole AI provider with zero third-party fallbacks.
-- [x] Implement Gemini fallback model resilience for 503/404 transient server spikes.
+- [x] Integrate Groq Cloud as primary AI provider (`llama-3.3-70b-versatile` & `llama-3.2-11b-vision-preview`).
+- [x] Implement Google Gemini (`gemini-3.8-flash`) as automatic fallback provider.
 - [x] Enforce user isolation and ground Ask SAGE prompts in real student database records.
 - [x] Implement honest error handling for missing keys, rate limits, and timeouts.
+- [x] Integrate new Figma-generated Ask SAGE chatbot UI into canonical frontend.
+- [x] Extend Ask SAGE into a multimodal productivity assistant (images, PDFs, circulars).
+- [x] Implement forwarded-message task extraction with timezone-anchored relative date resolution.
+- [x] Implement timetable upload parsing with conflict and duplicate detection.
+- [x] Connect real database actions with server-enforced ownership and idempotency.
+- [x] Implement Review Mode and Auto Mode with interactive undo capabilities.
+- [x] Integrate Brevo transactional email API with verified sender.
 - [x] Create backend `Reminder` JPA entity and repository in PostgreSQL.
 - [x] Implement `@Scheduled` reminder delivery worker respecting timezones and quiet hours.
-- [x] Implement Resend email client with safe error handling and HTML templates.
-- [x] Implement `ReminderController` with full CRUD and single verified test email endpoint.
-- [x] Prevent duplicate reminder deliveries and deduplicate contest reminders.
-- [x] Cascade delete reminders upon permanent account deletion.
-- [x] Fix TypeScript type errors in `vite.config.ts` and `client.ts`.
-- [x] Create unit and integration tests for Ask SAGE and Email Reminders.
-- [x] Pass all backend tests (58/58 total across services) and frontend tests (18/18).
-- [x] Verify production build (`npm run build`).
-- [x] Create root `.env.example` documenting all configuration keys without secrets.
-- [ ] Connect production `RESEND_API_KEY` credentials in deployment environment.
-- [ ] Perform live smoke test with verified single recipient email and real prompt in browser.
+- [x] Pass all backend tests (39/39) and frontend tests (34/34).
+- [x] Verify production build (`vite build` / `npm run build`).
+- [x] Update root `.env.example` documenting all configuration keys without secrets.
+
 

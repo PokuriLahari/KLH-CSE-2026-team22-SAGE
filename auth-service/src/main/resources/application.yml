@@ -48,13 +48,24 @@ jwt:
 
 sage:
   ai:
-    provider: ${AI_PROVIDER:google-gemini}
+    provider: ${AI_PROVIDER:groq}
+    groq:
+      api-key: ${GROQ_API_KEY:}
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+      model: ${GROQ_MODEL:llama-3.3-70b-versatile}
+      vision-model: ${GROQ_VISION_MODEL:llama-3.2-11b-vision-preview}
+      timeout-seconds: ${GROQ_TIMEOUT_SECONDS:25}
     gemini:
       api-key: ${GEMINI_API_KEY:${GEMINI_FALLBACK_API_KEY:}}
       base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
       model: ${GEMINI_MODEL:gemini-3-flash-preview}
       timeout-seconds: ${GEMINI_TIMEOUT_SECONDS:25}
   email:
+    brevo:
+      api-key: ${BREVO_API_KEY:}
+      sender-email: ${BREVO_SENDER_EMAIL:pokurilaharionedrive@gmail.com}
+      sender-name: ${BREVO_SENDER_NAME:SAGE}
+      base-url: ${BREVO_BASE_URL:https://api.brevo.com/v3}
     resend:
       api-key: ${RESEND_API_KEY:}
       from: ${EMAIL_FROM:SAGE <onboarding@resend.dev>}

@@ -281,4 +281,35 @@ public class ReminderServiceTests {
         assertEquals("usera_reminder@example.com", body.get("recipient"));
         assertEquals("resend-test-999", body.get("messageId"));
     }
+
+    @Test
+    void testBrevoTransactionalEmailDelegationInResendEmailService() {
+        auth_service.service.BrevoEmailService mockBrevo = mock(auth_service.service.BrevoEmailService.class);
+        when(mockBrevo.isConfigured()).thenReturn(true);
+        when(mockBrevo.getSenderName()).thenReturn("SAGE");
+        when(mockBrevo.getSenderEmail()).thenReturn("pokurilaharionedrive@gmail.com");
+        when(mockBrevo.sendEmail(eq("usera_reminder@example.com"), anyString(), anyString()))
+                .thenReturn(new auth_service.service.BrevoEmailService.EmailDeliveryResult(true, "<brevo-test-20261021@relay.brevo.com>", null));
+
+        ResendEmailService emailService = new ResendEmailService(mockBrevo, "", "");
+        assertTrue(emailService.isConfigured(), "Should be configured when Brevo is configured");
+        assertEquals("Brevo", emailService.getActiveProviderName());
+        assertEquals("SAGE <pokurilaharionedrive@gmail.com>", emailService.getFromAddress());
+
+        ReminderController controller = new ReminderController(reminderRepository, userRepository, emailService, jwtUtils);
+        ResponseEntity<?> response = controller.sendTestReminderEmail(
+                String.valueOf(userA.getId()),
+                null,
+                Map.of("title", "Brevo Transactional Verification")
+        );
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertNotNull(body);
+        assertEquals(true, body.get("success"));
+        assertEquals("<brevo-test-20261021@relay.brevo.com>", body.get("messageId"));
+        assertEquals("Brevo", body.get("provider"));
+        verify(mockBrevo, times(1)).sendEmail(eq("usera_reminder@example.com"), anyString(), anyString());
+    }
 }

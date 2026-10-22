@@ -313,9 +313,20 @@ public class AuthController {
             return ResponseEntity.badRequest().body(Map.of("error", "Title is required"));
         }
 
+        // Idempotency: if pending task with same title and deadline already exists, return existing task
+        String cleanTitle = taskInput.getTitle().trim();
+        List<Task> existing = taskRepository.findByUserIdOrderByCreatedAtDesc(userId);
+        for (Task existingTask : existing) {
+            if ("PENDING".equalsIgnoreCase(existingTask.getStatus())
+                    && existingTask.getTitle().equalsIgnoreCase(cleanTitle)
+                    && Objects.equals(existingTask.getDeadline(), taskInput.getDeadline())) {
+                return ResponseEntity.ok(existingTask);
+            }
+        }
+
         Task task = new Task();
         task.setUserId(userId);
-        task.setTitle(taskInput.getTitle().trim());
+        task.setTitle(cleanTitle);
         task.setDescription(taskInput.getDescription());
         task.setDeadline(taskInput.getDeadline());
         task.setEstimatedMinutes(taskInput.getEstimatedMinutes() != null ? taskInput.getEstimatedMinutes() : 45);
@@ -429,7 +440,7 @@ public class AuthController {
 
         if (!geminiAiService.isConfigured()) {
             Map<String, Object> unconfiguredResp = new HashMap<>();
-            unconfiguredResp.put("error", "SAGE AI assistant is unavailable: Backend GEMINI_API_KEY environment variable is not configured. Please set GEMINI_API_KEY in the backend environment to enable AI-powered assistance.");
+            unconfiguredResp.put("error", "SAGE AI assistant is unavailable: Backend GROQ_API_KEY or GEMINI_API_KEY environment variable is not configured. Please set GROQ_API_KEY or GEMINI_API_KEY in the backend environment to enable AI-powered assistance.");
             unconfiguredResp.put("configured", false);
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(unconfiguredResp);
         }
@@ -440,7 +451,16 @@ public class AuthController {
                     ? (Map<String, Object>) payload.get("context")
                     : Collections.emptyMap();
 
-            auth_service.service.GeminiAiService.SageAiResult aiResult = geminiAiService.generateResponse(user, tasks, prompt, extraContext);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> attachment = payload.containsKey("attachment") && payload.get("attachment") instanceof Map
+                    ? (Map<String, Object>) payload.get("attachment")
+                    : (payload.containsKey("image") && payload.get("image") instanceof Map
+                            ? (Map<String, Object>) payload.get("image")
+                            : null);
+
+            auth_service.service.GeminiAiService.SageAiResult aiResult = (attachment != null && !attachment.isEmpty())
+                    ? geminiAiService.generateResponse(user, tasks, prompt, extraContext, attachment)
+                    : geminiAiService.generateResponse(user, tasks, prompt, extraContext);
 
             String action;
             if (topPriority != null) {
