@@ -30,7 +30,6 @@
     "@fluentui/react-textarea": "9.7.7",
     "@fluentui/react-theme": "9.2.2",
     "@fluentui/react-tooltip": "9.10.7",
-    "google-auth-library": "^11.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

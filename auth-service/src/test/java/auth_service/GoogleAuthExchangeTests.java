@@ -262,6 +262,15 @@ public class GoogleAuthExchangeTests {
     }
 
     @Test
+    void testSpoofedXUserIdWithoutValidTokenIsRejected() {
+        ResponseEntity<?> resWithoutToken = authController.getCurrentUser("1", null);
+        assertEquals(HttpStatus.UNAUTHORIZED, resWithoutToken.getStatusCode(), "Unauthenticated request with spoofed X-User-Id must be rejected");
+
+        ResponseEntity<?> resWithBadToken = authController.getCurrentUser("1", "Bearer invalid-token");
+        assertEquals(HttpStatus.UNAUTHORIZED, resWithBadToken.getStatusCode(), "Request with spoofed X-User-Id and bad token must be rejected");
+    }
+
+    @Test
     void testTwoDistinctPermittedGoogleAccountsAreIsolated() throws Exception {
         userRepository.findByGoogleId("google-sub-alice").ifPresent(userRepository::delete);
         userRepository.findByGoogleId("google-sub-bob").ifPresent(userRepository::delete);

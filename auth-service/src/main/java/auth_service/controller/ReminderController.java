@@ -40,19 +40,15 @@ public class ReminderController {
     }
 
     private Long resolveUserId(String xUserId, String authHeader) {
-        if (xUserId != null && !xUserId.trim().isEmpty()) {
-            try {
-                return Long.parseLong(xUserId.trim());
-            } catch (NumberFormatException ignored) {}
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return null;
         }
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-            DecodedJWT jwt = jwtUtils.verifyToken(token);
-            if (jwt != null) {
-                try {
-                    return Long.parseLong(jwt.getSubject());
-                } catch (NumberFormatException ignored) {}
-            }
+        String token = authHeader.substring(7).trim();
+        DecodedJWT jwt = jwtUtils.verifyToken(token);
+        if (jwt != null) {
+            try {
+                return Long.parseLong(jwt.getSubject());
+            } catch (NumberFormatException ignored) {}
         }
         return null;
     }
@@ -168,21 +164,19 @@ public class ReminderController {
         if (payload.containsKey("eventStartTime") && payload.get("eventStartTime") != null) {
             reminder.setEventStartTime(payload.get("eventStartTime").toString());
         }
+        Optional<User> uOpt = userRepository.findById(userId);
+        String userAccountEmail = uOpt.map(u -> (u.getNotificationEmail() != null && !u.getNotificationEmail().isBlank())
+                ? u.getNotificationEmail()
+                : u.getEmail()).orElse(null);
+
         if (payload.containsKey("recipientEmail") && payload.get("recipientEmail") != null) {
             String recEmail = payload.get("recipientEmail").toString().trim();
-            if (!recEmail.isBlank() && recEmail.contains("@")) {
+            if (!recEmail.isBlank() && recEmail.equalsIgnoreCase(userAccountEmail)) {
                 reminder.setRecipientEmail(recEmail);
             }
         }
         if (reminder.getRecipientEmail() == null || reminder.getRecipientEmail().isBlank()) {
-            Optional<User> uOpt = userRepository.findById(userId);
-            if (uOpt.isPresent()) {
-                User u = uOpt.get();
-                String e = (u.getNotificationEmail() != null && !u.getNotificationEmail().isBlank())
-                        ? u.getNotificationEmail()
-                        : u.getEmail();
-                reminder.setRecipientEmail(e);
-            }
+            reminder.setRecipientEmail(userAccountEmail);
         }
 
         Reminder saved = reminderRepository.save(reminder);
@@ -276,18 +270,23 @@ public class ReminderController {
         Optional<User> userOpt = userRepository.findById(userId);
         User user = userOpt.orElse(null);
 
-        String toEmail = null;
-        if (body != null && body.containsKey("email") && body.get("email") != null) {
-            String passed = body.get("email").toString().trim();
-            if (!passed.isBlank() && passed.contains("@")) {
-                toEmail = passed;
-            }
+        String userAccountEmail = (user != null && user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
+                ? user.getNotificationEmail()
+                : (user != null ? user.getEmail() : null);
+
+        if (userAccountEmail == null || userAccountEmail.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "No recipient email address found for the logged-in user."));
         }
 
-        if (toEmail == null && user != null) {
-            toEmail = (user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
-                    ? user.getNotificationEmail()
-                    : user.getEmail();
+        // Security: Prevent open relay abuse by rejecting third-party recipients
+        String toEmail = userAccountEmail;
+        if (body != null && body.containsKey("email") && body.get("email") != null) {
+            String requested = body.get("email").toString().trim();
+            if (!requested.isBlank() && !requested.equalsIgnoreCase(userAccountEmail)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "Test emails can only be sent to your verified SAGE account email address (" + userAccountEmail + ")."
+                ));
+            }
         }
 
         if (toEmail == null || toEmail.isBlank()) {

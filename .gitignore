@@ -63,3 +63,5 @@ _archive/
 /AGENTS.md
 /CLAUDE.md
 /.gitattributes
+.neon
+node_modules/

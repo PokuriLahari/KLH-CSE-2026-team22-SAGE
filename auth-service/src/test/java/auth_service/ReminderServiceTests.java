@@ -124,7 +124,7 @@ public class ReminderServiceTests {
                 "notificationTiming", "30m"
         );
 
-        controller.createOrUpdateReminder(String.valueOf(userA.getId()), null, payload1);
+        controller.createOrUpdateReminder(String.valueOf(userA.getId()), "Bearer " + tokenA, payload1);
         assertEquals(1, reminderRepository.findByUserIdOrderByDueAtAsc(userA.getId()).size());
 
         // Click again with updated notification timing (e.g. 1h instead of 30m)
@@ -138,7 +138,7 @@ public class ReminderServiceTests {
                 "notificationTiming", "1h"
         );
 
-        controller.createOrUpdateReminder(String.valueOf(userA.getId()), null, payload2);
+        controller.createOrUpdateReminder(String.valueOf(userA.getId()), "Bearer " + tokenA, payload2);
 
         // Ensure NOT duplicated
         List<Reminder> list = reminderRepository.findByUserIdOrderByDueAtAsc(userA.getId());
@@ -159,14 +159,14 @@ public class ReminderServiceTests {
         remA = reminderRepository.save(remA);
 
         // User B queries reminders
-        ResponseEntity<?> bListResp = controller.getReminders(String.valueOf(userB.getId()), null);
+        ResponseEntity<?> bListResp = controller.getReminders(String.valueOf(userB.getId()), "Bearer " + tokenB);
         @SuppressWarnings("unchecked")
         List<Reminder> bList = (List<Reminder>) bListResp.getBody();
         assertNotNull(bList);
         assertEquals(0, bList.size(), "User B must not see User A's reminders");
 
         // User B attempts to delete User A's reminder -> 404 NOT FOUND
-        ResponseEntity<?> deleteResp = controller.deleteReminder(remA.getId(), String.valueOf(userB.getId()), null);
+        ResponseEntity<?> deleteResp = controller.deleteReminder(remA.getId(), String.valueOf(userB.getId()), "Bearer " + tokenB);
         assertEquals(HttpStatus.NOT_FOUND, deleteResp.getStatusCode());
 
         // User A's reminder remains intact
@@ -188,7 +188,7 @@ public class ReminderServiceTests {
                 reminderRepository, mockVerifier, mockAi, jwtUtils);
 
         // Delete User A account
-        ResponseEntity<?> resp = authController.deleteAccount(String.valueOf(userA.getId()), null, null);
+        ResponseEntity<?> resp = authController.deleteAccount(String.valueOf(userA.getId()), "Bearer " + tokenA, null);
         assertEquals(HttpStatus.OK, resp.getStatusCode());
 
         // Verify reminder is cascade deleted
@@ -269,7 +269,7 @@ public class ReminderServiceTests {
 
         ResponseEntity<?> response = controller.sendTestReminderEmail(
                 String.valueOf(userA.getId()),
-                null,
+                "Bearer " + tokenA,
                 Map.of("title", "Verified Single Recipient Test")
         );
 
@@ -299,7 +299,7 @@ public class ReminderServiceTests {
         ReminderController controller = new ReminderController(reminderRepository, userRepository, emailService, jwtUtils);
         ResponseEntity<?> response = controller.sendTestReminderEmail(
                 String.valueOf(userA.getId()),
-                null,
+                "Bearer " + tokenA,
                 Map.of("title", "Brevo Transactional Verification")
         );
 

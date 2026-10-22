@@ -1,5 +1,8 @@
 server:
-  port: 8081
+  port: ${PORT:8081}
+  tomcat:
+    max-http-form-post-size: 15MB
+    max-swallow-size: 15MB
 
 spring:
   application:
@@ -38,8 +41,9 @@ eureka:
   client:
     service-url:
       defaultZone: ${EUREKA_SERVER_URL:http://localhost:8761/eureka}
-    register-with-eureka: true
-    fetch-registry: true
+    enabled: ${EUREKA_CLIENT_ENABLED:true}
+    register-with-eureka: ${EUREKA_CLIENT_ENABLED:true}
+    fetch-registry: ${EUREKA_CLIENT_ENABLED:true}
   instance:
     prefer-ip-address: true
 

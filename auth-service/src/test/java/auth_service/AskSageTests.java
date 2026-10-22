@@ -91,7 +91,7 @@ public class AskSageTests {
         AuthController controller = new AuthController(userRepository, taskRepository, deletedAccountRepository,
                 reminderRepository, mockVerifier, unconfiguredAiService, jwtUtils);
 
-        ResponseEntity<?> response = controller.askSage(String.valueOf(testUser.getId()), null,
+        ResponseEntity<?> response = controller.askSage(String.valueOf(testUser.getId()), "Bearer " + testToken,
                 Map.of("message", "What should I do tonight?"));
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
@@ -165,7 +165,7 @@ public class AskSageTests {
 
         ResponseEntity<?> response = controller.askSage(
                 String.valueOf(testUser.getId()),
-                null,
+                "Bearer " + testToken,
                 Map.of("message", "Prioritize my week")
         );
 
@@ -189,7 +189,7 @@ public class AskSageTests {
 
         ResponseEntity<?> response = controller.askSage(
                 String.valueOf(testUser.getId()),
-                null,
+                "Bearer " + testToken,
                 Map.of("message", "Prioritize my week")
         );
 
@@ -213,7 +213,7 @@ public class AskSageTests {
 
         ResponseEntity<?> response = controller.askSage(
                 String.valueOf(testUser.getId()),
-                null,
+                "Bearer " + testToken,
                 Map.of("message", "Prioritize my week")
         );
 
@@ -476,7 +476,7 @@ public class AskSageTests {
         AuthController controller = new AuthController(userRepository, taskRepository, deletedAccountRepository,
                 reminderRepository, mockVerifier, orchestrator, jwtUtils);
 
-        ResponseEntity<?> response = controller.askSage(String.valueOf(testUser.getId()), null,
+        ResponseEntity<?> response = controller.askSage(String.valueOf(testUser.getId()), "Bearer " + testToken,
                 Map.of("message", "What should I do?"));
 
         assertEquals(HttpStatus.OK, response.getStatusCode());

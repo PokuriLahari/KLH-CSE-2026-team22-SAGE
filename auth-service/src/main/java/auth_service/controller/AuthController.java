@@ -50,19 +50,15 @@ public class AuthController {
     }
 
     private Long resolveUserId(String xUserId, String authHeader) {
-        if (xUserId != null && !xUserId.trim().isEmpty()) {
-            try {
-                return Long.parseLong(xUserId.trim());
-            } catch (NumberFormatException ignored) {}
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return null;
         }
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-            DecodedJWT jwt = jwtUtils.verifyToken(token);
-            if (jwt != null) {
-                try {
-                    return Long.parseLong(jwt.getSubject());
-                } catch (NumberFormatException ignored) {}
-            }
+        String token = authHeader.substring(7).trim();
+        DecodedJWT jwt = jwtUtils.verifyToken(token);
+        if (jwt != null) {
+            try {
+                return Long.parseLong(jwt.getSubject());
+            } catch (NumberFormatException ignored) {}
         }
         return null;
     }
