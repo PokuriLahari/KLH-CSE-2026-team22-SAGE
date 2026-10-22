@@ -78,24 +78,29 @@ public class ReminderSchedulerService {
             return;
         }
 
+        String toEmail = reminder.getRecipientEmail();
+        String recipientName = null;
+
         Optional<User> userOpt = userRepository.findById(reminder.getUserId());
-        if (userOpt.isEmpty()) {
+        User user = userOpt.orElse(null);
+        if (user != null) {
+            recipientName = user.getName();
+            if (toEmail == null || toEmail.isBlank()) {
+                toEmail = (user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
+                        ? user.getNotificationEmail()
+                        : user.getEmail();
+            }
+        }
+
+        if (toEmail == null || toEmail.isBlank() || !toEmail.contains("@")) {
             reminder.setDeliveryStatus("SKIPPED");
-            reminder.setDeliveryError("Associated student account not found");
+            reminder.setDeliveryError("No registered notification email address for student");
             reminderRepository.save(reminder);
             return;
         }
 
-        User user = userOpt.get();
-        String toEmail = (user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
-                ? user.getNotificationEmail()
-                : user.getEmail();
-
-        if (toEmail == null || toEmail.isBlank()) {
-            reminder.setDeliveryStatus("SKIPPED");
-            reminder.setDeliveryError("User has no registered notification email address");
-            reminderRepository.save(reminder);
-            return;
+        if (recipientName == null || recipientName.isBlank()) {
+            recipientName = toEmail.split("@")[0];
         }
 
         // Check quiet hours in user's timezone (skip quiet hours for contest, exam, task deadlines, and scheduled user reminders)
@@ -105,7 +110,7 @@ public class ReminderSchedulerService {
                 || "task".equalsIgnoreCase(reminder.getTargetType())
                 || isExplicitlyScheduled;
 
-        if (!isUrgentDeadline && isInsideQuietHours(user, now)) {
+        if (user != null && !isUrgentDeadline && isInsideQuietHours(user, now)) {
             log.info("Quiet hours active for user {}, postponing non-urgent reminder id={}", user.getId(), reminder.getId());
             return;
         }
@@ -116,7 +121,7 @@ public class ReminderSchedulerService {
 
         String subject = "SAGE Reminder: " + reminder.getTitle();
         String htmlContent = resendEmailService.buildReminderEmailHtml(
-                user.getName(),
+                recipientName,
                 reminder.getTitle(),
                 reminder.getTargetType(),
                 reminder.getEventStartTime(),

@@ -7888,7 +7888,8 @@ function SettingsScreen({
                       setTestEmailLoading(true)
                       setTestEmailStatus(null)
                       try {
-                        const res = await sendTestReminderEmail("Upcoming Deadline: SAGE Milestone Check")
+                        const targetRecipient = profile.email || ""
+                        const res = await sendTestReminderEmail("Upcoming Deadline: SAGE Milestone Check", targetRecipient)
                         if (res && res.success) {
                           setTestEmailStatus(`✓ Sent to ${res.recipient}!`)
                         } else {

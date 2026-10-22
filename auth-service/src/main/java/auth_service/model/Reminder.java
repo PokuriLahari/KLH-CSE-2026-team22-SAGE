@@ -71,6 +71,9 @@ public class Reminder {
     @Column(name = "delivery_error", length = 1000)
     private String deliveryError;
 
+    @Column(name = "recipient_email", length = 255)
+    private String recipientEmail;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -239,6 +242,14 @@ public class Reminder {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getRecipientEmail() {
+        return recipientEmail;
+    }
+
+    public void setRecipientEmail(String recipientEmail) {
+        this.recipientEmail = recipientEmail;
     }
 
     public Instant getUpdatedAt() {

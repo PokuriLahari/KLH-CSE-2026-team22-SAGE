@@ -34,6 +34,7 @@ export type Reminder = {
   platform?: string
   contestUrl?: string
   eventStartTime?: string
+  recipientEmail?: string
 }
 
 export type NotificationPreferences = {
@@ -305,6 +306,7 @@ export function normalizeReminder(raw: RawReminderInput): Reminder {
     platform: raw.platform,
     contestUrl: raw.contestUrl,
     eventStartTime: raw.eventStartTime,
+    recipientEmail: raw.recipientEmail,
   }
 }
 

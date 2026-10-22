@@ -28,6 +28,7 @@ export type BackendReminder = {
   deliveryStatus: "PENDING" | "DELIVERED" | "FAILED" | "SKIPPED"
   deliveryAttempts: number
   deliveryError?: string
+  recipientEmail?: string
   createdAt: string
   updatedAt: string
 }
@@ -77,6 +78,7 @@ export function backendReminderToFrontend(b: BackendReminder): Reminder {
     platform: b.platform,
     contestUrl: b.contestUrl,
     eventStartTime: b.eventStartTime,
+    recipientEmail: b.recipientEmail,
   }
 }
 
@@ -99,7 +101,20 @@ export async function syncReminderToBackend(
   reminder: Partial<Reminder>,
 ): Promise<BackendReminder | null> {
   try {
-    return await apiClient.post<BackendReminder>("/reminders", reminder)
+    let emailToSend = reminder.recipientEmail
+    if (!emailToSend && typeof window !== "undefined") {
+      try {
+        const storedProfile = window.localStorage.getItem("sage-user-profile")
+        if (storedProfile) {
+          const parsed = JSON.parse(storedProfile)
+          if (parsed && parsed.email) emailToSend = parsed.email
+        }
+      } catch {}
+    }
+    return await apiClient.post<BackendReminder>("/reminders", {
+      ...reminder,
+      recipientEmail: emailToSend,
+    })
   } catch (err) {
     console.warn("Could not sync reminder to backend:", err)
     return null
@@ -135,8 +150,18 @@ export async function deleteBackendReminder(id: number | string): Promise<boolea
 }
 
 /**
- * Sends a single verified test reminder email to the authenticated user's address.
+ * Sends a single verified test reminder email to the recipient address.
  */
-export async function sendTestReminderEmail(title?: string): Promise<TestEmailResponse> {
-  return await apiClient.post<TestEmailResponse>("/reminders/test-email", { title })
+export async function sendTestReminderEmail(title?: string, email?: string): Promise<TestEmailResponse> {
+  let targetEmail = email
+  if (!targetEmail && typeof window !== "undefined") {
+    try {
+      const storedProfile = window.localStorage.getItem("sage-user-profile")
+      if (storedProfile) {
+        const parsed = JSON.parse(storedProfile)
+        if (parsed && parsed.email) targetEmail = parsed.email
+      }
+    } catch {}
+  }
+  return await apiClient.post<TestEmailResponse>("/reminders/test-email", { title, email: targetEmail })
 }

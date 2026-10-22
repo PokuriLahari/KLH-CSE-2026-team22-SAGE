@@ -168,6 +168,22 @@ public class ReminderController {
         if (payload.containsKey("eventStartTime") && payload.get("eventStartTime") != null) {
             reminder.setEventStartTime(payload.get("eventStartTime").toString());
         }
+        if (payload.containsKey("recipientEmail") && payload.get("recipientEmail") != null) {
+            String recEmail = payload.get("recipientEmail").toString().trim();
+            if (!recEmail.isBlank() && recEmail.contains("@")) {
+                reminder.setRecipientEmail(recEmail);
+            }
+        }
+        if (reminder.getRecipientEmail() == null || reminder.getRecipientEmail().isBlank()) {
+            Optional<User> uOpt = userRepository.findById(userId);
+            if (uOpt.isPresent()) {
+                User u = uOpt.get();
+                String e = (u.getNotificationEmail() != null && !u.getNotificationEmail().isBlank())
+                        ? u.getNotificationEmail()
+                        : u.getEmail();
+                reminder.setRecipientEmail(e);
+            }
+        }
 
         Reminder saved = reminderRepository.save(reminder);
         return ResponseEntity.status(HttpStatus.CREATED).body(saved);
@@ -258,25 +274,36 @@ public class ReminderController {
         }
 
         Optional<User> userOpt = userRepository.findById(userId);
-        if (userOpt.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "User not found"));
+        User user = userOpt.orElse(null);
+
+        String toEmail = null;
+        if (body != null && body.containsKey("email") && body.get("email") != null) {
+            String passed = body.get("email").toString().trim();
+            if (!passed.isBlank() && passed.contains("@")) {
+                toEmail = passed;
+            }
         }
 
-        User user = userOpt.get();
-        String toEmail = (user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
-                ? user.getNotificationEmail()
-                : user.getEmail();
+        if (toEmail == null && user != null) {
+            toEmail = (user.getNotificationEmail() != null && !user.getNotificationEmail().isBlank())
+                    ? user.getNotificationEmail()
+                    : user.getEmail();
+        }
 
         if (toEmail == null || toEmail.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "User does not have an active email address registered."));
+            return ResponseEntity.badRequest().body(Map.of("error", "No recipient email address found for the logged-in user."));
         }
 
-        String title = (body != null && body.containsKey("title"))
+        String recipientName = (user != null && user.getName() != null && !user.getName().isBlank())
+                ? user.getName()
+                : toEmail.split("@")[0];
+
+        String title = (body != null && body.containsKey("title") && body.get("title") != null)
                 ? body.get("title").toString()
                 : "Complete Lab Assignment & Submit Code";
 
         String html = resendEmailService.buildReminderEmailHtml(
-                user.getName(),
+                recipientName,
                 title,
                 "Academic",
                 "Today at 18:00",
