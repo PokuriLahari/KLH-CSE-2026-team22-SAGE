@@ -865,7 +865,6 @@ export function AskSageChatbot({
         dueDate: candidate.dueDate,
         dueTime: candidate.dueTime,
         priority: priorityFormatted,
-        category: candidate.category || "Academic",
         status: "open",
       })
 

@@ -147,7 +147,7 @@ export default function InAppNotificationBanner({
             </span>
           </div>
           <Text
-            as="div"
+            as="p"
             weight="semibold"
             size={300}
             style={{
