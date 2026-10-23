@@ -38,7 +38,7 @@ public class SecurityConfig {
         http
             .csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"))
             .authorizeHttpRequests(authorize -> authorize
-                .requestMatchers("/login/**", "/oauth2/**", "/error", "/api/**", "/actuator/health").permitAll()
+                .requestMatchers("/health", "/healthz", "/login/**", "/oauth2/**", "/error", "/api/**", "/actuator/health").permitAll()
                 .anyRequest().authenticated()
             )
             .oauth2Login(oauth2 -> oauth2

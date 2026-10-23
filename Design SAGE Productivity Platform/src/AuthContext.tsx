@@ -10,6 +10,8 @@ import {
   ApiError,
   clearStoredToken,
   getStoredToken,
+  isTransientErrorStatus,
+  prewarmBackend,
   setStoredToken,
 } from "./api/client"
 import { clearUserStorage } from "./userStorage"
@@ -27,6 +29,8 @@ export type AuthUser = {
 export type AuthContextType = {
   user: AuthUser | null
   isAuthenticated: boolean
+  isSubmittingLogin: boolean
+  isTransientAuthError: boolean
   loginWithCredential: (credential: string) => Promise<boolean>
   loginWithUser: (user: AuthUser) => void
   signOut: () => void
@@ -137,12 +141,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
 
   const [error, setError] = useState<string | null>(null)
+  const [isSubmittingLogin, setIsSubmittingLogin] = useState<boolean>(false)
+  const isSubmittingLoginRef = useRef<boolean>(false)
+  const [isTransientAuthError, setIsTransientAuthError] = useState<boolean>(false)
 
-  const clearError = useCallback(() => setError(null), [])
+  // Lightweight non-blocking backend pre-warm on initial mount
+  useEffect(() => {
+    prewarmBackend()
+  }, [])
+
+  const clearError = useCallback(() => {
+    setError(null)
+    setIsTransientAuthError(false)
+  }, [])
 
   const signOut = useCallback(() => {
     setUser(null)
     setError(null)
+    setIsTransientAuthError(false)
     try {
       clearStoredToken()
       window.localStorage.removeItem(AUTH_STORAGE_KEY)
@@ -242,8 +258,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (credential: string): Promise<boolean> => {
       if (!credential || !credential.trim()) {
         setError("Google sign-in wasn't completed. Please try again.")
+        setIsTransientAuthError(false)
         return false
       }
+
+      // Prevent duplicate simultaneous login submissions
+      if (isSubmittingLoginRef.current) {
+        return false
+      }
+      isSubmittingLoginRef.current = true
+      setIsSubmittingLogin(true)
+      setIsTransientAuthError(false)
 
       try {
         const response = await apiClient.post<BackendAuthResponse>(
@@ -251,6 +276,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           {
             credential: credential.trim(),
           },
+          { timeoutMs: 15000 },
         )
 
         if (!response || !response.token || !response.user) {
@@ -258,6 +284,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setError(
             "We couldn't verify your account with SAGE. Please try again.",
           )
+          setIsTransientAuthError(false)
           if (import.meta.env.DEV) {
             console.error(
               "[SAGE Auth] Backend response missing token or user object",
@@ -280,6 +307,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         setUser(authUser)
         setError(null)
+        setIsTransientAuthError(false)
 
         try {
           window.localStorage.setItem(
@@ -319,6 +347,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           window.localStorage.removeItem(AUTH_STORAGE_KEY)
         } catch {}
         setUser(null)
+
+        const isTransient =
+          err instanceof ApiError &&
+          isTransientErrorStatus(err.status, err.message)
+        setIsTransientAuthError(isTransient)
+
         const userMessage =
           err instanceof ApiError
             ? err.message
@@ -331,6 +365,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           )
         }
         return false
+      } finally {
+        isSubmittingLoginRef.current = false
+        setIsSubmittingLogin(false)
       }
     },
     [],
@@ -427,6 +464,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         isAuthenticated: !!user?.authenticated,
+        isSubmittingLogin,
+        isTransientAuthError,
         loginWithCredential,
         loginWithUser,
         signOut,

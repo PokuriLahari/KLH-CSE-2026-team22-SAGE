@@ -127,4 +127,55 @@ class AuthServiceApplicationTests {
             assertFalse(line.contains("Google ID"), "Response should not contain Google ID line");
         }
     }
+
+    @Autowired
+    private auth_service.controller.RootHealthController rootHealthController;
+
+    @Autowired
+    private auth_service.controller.ContestController contestController;
+
+    @Test
+    void testRootHealthEndpointReturnsCleanStatusWithoutSensitiveInfo() {
+        assertNotNull(rootHealthController, "RootHealthController should be loaded in Spring context");
+        org.springframework.http.ResponseEntity<java.util.Map<String, Object>> resp = rootHealthController.health();
+        assertEquals(org.springframework.http.HttpStatus.OK, resp.getStatusCode());
+        assertNotNull(resp.getBody());
+        assertEquals("UP", resp.getBody().get("status"));
+        assertEquals("auth-service", resp.getBody().get("service"));
+
+        // Confirm zero sensitive information exposed
+        assertEquals(2, resp.getBody().size(), "Health response must only contain status and service fields");
+        assertFalse(resp.getBody().containsKey("password"));
+        assertFalse(resp.getBody().containsKey("secret"));
+        assertFalse(resp.getBody().containsKey("database"));
+        assertFalse(resp.getBody().containsKey("env"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testContestControllerResponseShapeInSpringContext() {
+        assertNotNull(contestController, "ContestController should be loaded in Spring context");
+        org.springframework.http.ResponseEntity<java.util.Map<String, Object>> resp = contestController.getUpcomingContests();
+        assertEquals(org.springframework.http.HttpStatus.OK, resp.getStatusCode());
+        assertNotNull(resp.getBody());
+        assertTrue(resp.getBody().containsKey("contests"), "Response must contain 'contests' array");
+        assertTrue(resp.getBody().containsKey("lastUpdated"), "Response must contain 'lastUpdated' string");
+
+        java.util.List<java.util.Map<String, Object>> list = (java.util.List<java.util.Map<String, Object>>) resp.getBody().get("contests");
+        assertNotNull(list);
+
+        // If upstream returned contests or cache is populated, verify field parity
+        for (java.util.Map<String, Object> c : list) {
+            assertNotNull(c.get("id"), "Contest must have 'id'");
+            assertNotNull(c.get("platform"), "Contest must have 'platform'");
+            assertNotNull(c.get("name"), "Contest must have 'name'");
+            assertNotNull(c.get("startTime"), "Contest must have 'startTime'");
+            assertNotNull(c.get("duration"), "Contest must have 'duration'");
+            assertNotNull(c.get("url"), "Contest must have 'url'");
+            assertNotNull(c.get("status"), "Contest must have 'status'");
+            assertNotNull(c.get("lastUpdated"), "Contest must have 'lastUpdated'");
+            assertTrue(c.containsKey("reminder"), "Contest must have 'reminder' key");
+        }
+    }
 }
+

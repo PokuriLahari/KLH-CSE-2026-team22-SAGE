@@ -142,6 +142,7 @@ import {
   type SageContext,
   askSage,
 } from "./services/sageService"
+import { fetchUpcomingContests } from "./services/contestService"
 import AskSageChatbot from "./components/AskSageChatbot"
 import InAppNotificationBanner from "./components/InAppNotificationBanner"
 import {
@@ -5732,12 +5733,8 @@ function ContestsScreen({
     const controller = new AbortController()
     setLoading(true)
     setFailed(false)
-    fetch("/api/contests", { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error("unavailable")
-        return response.json() as Promise<{ contests: Contest[] }>
-      })
-      .then((data) => setContests(data.contests))
+    fetchUpcomingContests(controller.signal, retry > 0)
+      .then((data) => setContests(data))
       .catch((error: Error) => {
         if (error.name !== "AbortError") setFailed(true)
       })

@@ -62,16 +62,34 @@ const API_BASE_URL =
   "/api"
 
 /**
+ * Determines whether an HTTP status or raw message corresponds to a transient/cold-start error.
+ */
+export function isTransientErrorStatus(
+  status: number,
+  rawMessage?: string,
+): boolean {
+  return (
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    status === 0 ||
+    rawMessage === "Service Unavailable" ||
+    rawMessage === "Bad Gateway" ||
+    rawMessage === "Gateway Timeout"
+  )
+}
+
+/**
  * Normalizes user-safe error message avoiding technical jargon
  */
-function sanitizeErrorMessage(
+export function sanitizeErrorMessage(
   status: number,
   rawMessage?: string,
   isAuthEndpoint?: boolean,
 ): string {
-  if (status === 502 || status === 503 || rawMessage === "Service Unavailable") {
+  if (isTransientErrorStatus(status, rawMessage)) {
     return isAuthEndpoint
-      ? "Authentication service is temporarily unavailable or starting up. Please try again in a moment."
+      ? "Authentication service is starting. Please retry shortly."
       : "The service is temporarily unavailable. Please try again in a moment."
   }
   if (
@@ -101,9 +119,13 @@ function sanitizeErrorMessage(
   return "We couldn't connect to SAGE right now. Please try again in a moment."
 }
 
+export type RequestOptions = RequestInit & {
+  timeoutMs?: number
+}
+
 async function request<T>(
   endpoint: string,
-  options: RequestInit = {},
+  options: RequestOptions = {},
 ): Promise<T> {
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`
   const url = cleanEndpoint.startsWith("http")
@@ -123,11 +145,47 @@ async function request<T>(
     headers.set("Authorization", `Bearer ${token}`)
   }
 
+  let timerId: ReturnType<typeof setTimeout> | undefined
+  const internalController = new AbortController()
+  const callerSignal = options.signal
+
+  if (callerSignal?.aborted) {
+    throw (
+      callerSignal.reason ??
+      new DOMException("The operation was aborted.", "AbortError")
+    )
+  }
+
+  const timeoutMs =
+    options.timeoutMs ?? (cleanEndpoint.startsWith("/auth/") ? 15000 : 20000)
+
+  const onCallerAbort = () => {
+    internalController.abort(
+      callerSignal?.reason ??
+        new DOMException("The operation was aborted.", "AbortError"),
+    )
+  }
+
+  if (callerSignal) {
+    callerSignal.addEventListener("abort", onCallerAbort, { once: true })
+  }
+
+  if (timeoutMs > 0 && timeoutMs !== Number.POSITIVE_INFINITY) {
+    timerId = setTimeout(() => {
+      internalController.abort(
+        new DOMException("The request timed out.", "TimeoutError"),
+      )
+    }, timeoutMs)
+  }
+
+  const signal = internalController.signal
+
   const startedAt = performance.now()
   try {
     const response = await fetch(url, {
       ...options,
       headers,
+      signal,
     })
 
     if (response.status === 204) {
@@ -168,9 +226,33 @@ async function request<T>(
         }
       }
 
-      const serverRequestId = response.headers.get("X-Request-Id") || (data && typeof data === "object" ? String((data as Record<string, unknown>).requestId || "") : "") || requestId
-      const message = sanitizeErrorMessage(response.status, rawMsg, isAuthEndpoint)
-      recordDiagnostic({ severity: response.status >= 500 || response.status === 0 ? "error" : "warning", source: classifyEndpoint(cleanEndpoint), title: "Failed API request", message, observed: true, method: options.method || "GET", endpoint: cleanEndpoint, status: response.status, durationMs: Math.round(performance.now() - startedAt), requestId: serverRequestId, details: redact({ response: data }) as Record<string, unknown> })
+      const serverRequestId =
+        response.headers.get("X-Request-Id") ||
+        (data && typeof data === "object"
+          ? String((data as Record<string, unknown>).requestId || "")
+          : "") ||
+        requestId
+      const message = sanitizeErrorMessage(
+        response.status,
+        rawMsg,
+        isAuthEndpoint,
+      )
+      recordDiagnostic({
+        severity:
+          response.status >= 500 || response.status === 0
+            ? "error"
+            : "warning",
+        source: classifyEndpoint(cleanEndpoint),
+        title: "Failed API request",
+        message,
+        observed: true,
+        method: options.method || "GET",
+        endpoint: cleanEndpoint,
+        status: response.status,
+        durationMs: Math.round(performance.now() - startedAt),
+        requestId: serverRequestId,
+        details: redact({ response: data }) as Record<string, unknown>,
+      })
       throw new ApiError(
         response.status,
         message,
@@ -184,24 +266,97 @@ async function request<T>(
     if (err instanceof ApiError) {
       throw err
     }
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw err
+    const isTimeout =
+      (err instanceof DOMException && err.name === "TimeoutError") ||
+      (err instanceof Error && err.name === "TimeoutError") ||
+      (internalController.signal.aborted &&
+        internalController.signal.reason instanceof DOMException &&
+        internalController.signal.reason.name === "TimeoutError")
+
+    const isCallerAbort =
+      !isTimeout &&
+      (Boolean(callerSignal?.aborted) ||
+        (err instanceof DOMException && err.name === "AbortError"))
+
+    if (isCallerAbort) {
+      throw err instanceof Error
+        ? err
+        : new DOMException("The operation was aborted.", "AbortError")
     }
-    const message = err instanceof TypeError ? "Network request failed. This may be an unavailable service, connection refusal, or a browser CORS restriction." : "We couldn't connect to SAGE right now. Please try again in a moment."
-    recordDiagnostic({ severity: "error", source: "Network", title: "Network request failed", message, observed: true, method: options.method || "GET", endpoint: cleanEndpoint, status: 0, durationMs: Math.round(performance.now() - startedAt), requestId, details: redact({ error: err instanceof Error ? err.message : String(err), suspectedCause: "Browsers do not expose a definitive CORS cause; this is an observed network failure." }) as Record<string, unknown> })
+    const isAuthEndpoint =
+      cleanEndpoint.startsWith("/auth/google") ||
+      cleanEndpoint.startsWith("/auth/login")
+
+    let message: string
+    if (isAuthEndpoint && (isTimeout || err instanceof TypeError)) {
+      message = "Authentication service is starting. Please retry shortly."
+    } else if (err instanceof TypeError) {
+      message =
+        "Network request failed. This may be an unavailable service, connection refusal, or a browser CORS restriction."
+    } else if (isTimeout) {
+      message = "The request timed out. Please try again."
+    } else {
+      message =
+        "We couldn't connect to SAGE right now. Please try again in a moment."
+    }
+
+    recordDiagnostic({
+      severity: "error",
+      source: "Network",
+      title: isTimeout ? "Request timed out" : "Network request failed",
+      message,
+      observed: true,
+      method: options.method || "GET",
+      endpoint: cleanEndpoint,
+      status: 0,
+      durationMs: Math.round(performance.now() - startedAt),
+      requestId,
+      details: redact({
+        error: err instanceof Error ? err.message : String(err),
+        isTimeout,
+        suspectedCause: isTimeout
+          ? "Request exceeded bounded timeout limit."
+          : "Network connectivity or CORS restriction.",
+      }) as Record<string, unknown>,
+    })
     throw new ApiError(
       0,
       message,
       undefined,
       requestId,
     )
+  } finally {
+    if (timerId) {
+      clearTimeout(timerId)
+    }
+    if (callerSignal) {
+      callerSignal.removeEventListener("abort", onCallerAbort)
+    }
   }
 }
 
+let lastPrewarmTimestamp = 0
+const PREWARM_COOLDOWN_MS = 300_000 // 5 minutes
+
+export function prewarmBackend(force = false): void {
+  if (typeof window === "undefined") return
+  const now = Date.now()
+  if (!force && now - lastPrewarmTimestamp < PREWARM_COOLDOWN_MS) return
+  lastPrewarmTimestamp = now
+  // Non-blocking fire-and-forget ping to wake up sleeping backend container
+  apiClient.get("/health", { timeoutMs: 8000 }).catch(() => {
+    // Silently ignore failures during pre-warm; Render receives incoming probe
+  })
+}
+
+export function resetPrewarmCooldownForTesting(): void {
+  lastPrewarmTimestamp = 0
+}
+
 export const apiClient = {
-  get: <T>(url: string, options?: RequestInit) =>
+  get: <T>(url: string, options?: RequestOptions) =>
     request<T>(url, { ...options, method: "GET" }),
-  post: <T>(url: string, body?: unknown, options?: RequestInit) =>
+  post: <T>(url: string, body?: unknown, options?: RequestOptions) =>
     request<T>(url, {
       ...options,
       method: "POST",
@@ -212,7 +367,7 @@ export const apiClient = {
             : JSON.stringify(body)
           : undefined,
     }),
-  put: <T>(url: string, body?: unknown, options?: RequestInit) =>
+  put: <T>(url: string, body?: unknown, options?: RequestOptions) =>
     request<T>(url, {
       ...options,
       method: "PUT",
@@ -223,7 +378,7 @@ export const apiClient = {
             : JSON.stringify(body)
           : undefined,
     }),
-  patch: <T>(url: string, body?: unknown, options?: RequestInit) =>
+  patch: <T>(url: string, body?: unknown, options?: RequestOptions) =>
     request<T>(url, {
       ...options,
       method: "PATCH",
@@ -234,6 +389,7 @@ export const apiClient = {
             : JSON.stringify(body)
           : undefined,
     }),
-  delete: <T>(url: string, options?: RequestInit) =>
+  delete: <T>(url: string, options?: RequestOptions) =>
     request<T>(url, { ...options, method: "DELETE" }),
+  prewarm: prewarmBackend,
 }

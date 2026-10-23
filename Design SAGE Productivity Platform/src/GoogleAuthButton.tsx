@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react"
 import { Text } from "@fluentui/react-text"
+import { Button } from "@fluentui/react-button"
 import { useAuth, type AuthUser } from "./AuthContext"
 import { getGoogleClientId, loadGoogleIdentity } from "./googleCalendar"
+import { prewarmBackend } from "./api/client"
 
 let gisInitializedClientId: string | null = null
 let activeCredentialHandler: ((credential: string) => void) | null = null
@@ -19,24 +21,39 @@ export default function GoogleAuthButton({
 }: GoogleAuthButtonProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const isSubmittingRef = useRef<boolean>(false)
+  const lastCredentialRef = useRef<string | null>(null)
   const onSuccessRef = useRef(onSuccess)
   onSuccessRef.current = onSuccess
   const onErrorRef = useRef(onError)
   onErrorRef.current = onError
 
-  const { loginWithCredential, error, setError, clearError } = useAuth()
+  const {
+    loginWithCredential,
+    error,
+    setError,
+    clearError,
+    isSubmittingLogin,
+    isTransientAuthError,
+  } = useAuth()
   const [loading, setLoading] = useState(true)
+
+  // Pre-warm backend when GoogleAuthButton mounts
+  useEffect(() => {
+    prewarmBackend()
+  }, [])
 
   useEffect(() => {
     let active = true
 
     const handleCredential = async (credential: string) => {
-      if (!credential || !active || isSubmittingRef.current) return
+      if (!credential || !active || isSubmittingRef.current || isSubmittingLogin) return
       isSubmittingRef.current = true
       setLoading(true)
+      lastCredentialRef.current = credential
       try {
         const ok = await loginWithCredential(credential)
         if (ok && active) {
+          lastCredentialRef.current = null
           clearError()
           try {
             const stored = window.localStorage.getItem("sage_auth_user")
@@ -46,21 +63,10 @@ export default function GoogleAuthButton({
             }
           } catch {}
         } else if (active) {
-          if (import.meta.env.DEV) {
-            console.error(
-              "[GoogleAuthButton] Google sign-in failed during credential verification",
-            )
-          }
           onErrorRef.current?.("Sign-in could not be completed.")
         }
       } catch (err: unknown) {
         if (active) {
-          if (import.meta.env.DEV) {
-            console.error(
-              "[GoogleAuthButton] Unexpected error during Google sign-in:",
-              err instanceof Error ? err.message : err,
-            )
-          }
           const msg = "Google sign-in wasn't completed. Please try again."
           setError(msg)
           onErrorRef.current?.(msg)
@@ -202,9 +208,27 @@ export default function GoogleAuthButton({
             width: "100%",
             boxSizing: "border-box",
             border: "1px solid #f99f9f",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+            alignItems: "center",
           }}
         >
-          {error}
+          <span>{error}</span>
+          {isTransientAuthError && lastCredentialRef.current && !loading && (
+            <Button
+              size="small"
+              appearance="secondary"
+              disabled={isSubmittingRef.current || isSubmittingLogin}
+              onClick={() => {
+                if (lastCredentialRef.current && activeCredentialHandler) {
+                  activeCredentialHandler(lastCredentialRef.current)
+                }
+              }}
+            >
+              Retry Sign-In
+            </Button>
+          )}
         </div>
       )}
     </div>

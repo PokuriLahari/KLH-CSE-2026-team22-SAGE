@@ -63,6 +63,11 @@ public class AuthController {
         return null;
     }
 
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, Object>> health() {
+        return ResponseEntity.ok(Map.of("status", "UP", "service", "auth-service"));
+    }
+
     @DeleteMapping("/auth/account")
     @Transactional
     public ResponseEntity<?> deleteAccount(

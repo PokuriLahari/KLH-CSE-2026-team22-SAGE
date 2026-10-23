@@ -499,4 +499,13 @@ public class GoogleAuthExchangeTests {
         // Cleanup
         userRepository.delete(created.get());
     }
+
+    @Test
+    void testHealthEndpointReturnsUp() {
+        ResponseEntity<Map<String, Object>> res = authController.health();
+        assertEquals(HttpStatus.OK, res.getStatusCode());
+        assertNotNull(res.getBody());
+        assertEquals("UP", res.getBody().get("status"));
+        assertEquals("auth-service", res.getBody().get("service"));
+    }
 }
