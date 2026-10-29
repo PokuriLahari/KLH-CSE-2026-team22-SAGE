@@ -4,6 +4,15 @@
 
 ---
 
+## Live Demo
+
+- **Web Application (Frontend):** https://sage-productivity-platform.vercel.app
+- **Backend API (auth-service):** https://sage-auth-service.onrender.com
+- **API Health Check:** https://sage-auth-service.onrender.com/actuator/health
+- **Database:** Neon Serverless PostgreSQL (AWS `ap-southeast-1`)
+
+> **Note:** The `auth-service` is hosted on Render and may take a few minutes to start when it is inactive. If the first request does not respond immediately, please wait a few minutes and try again.
+
 ## 1. Problem Statement & Key Objectives
 
 University students routinely navigate multiple disjointed channels: course learning systems, assignment deadlines, exam timetables, Google Calendar events, and competitive programming rounds across LeetCode, Codeforces, CodeChef, and AtCoder.
